@@ -67,9 +67,7 @@ enum ENUM_BALANCE_MODE
 //                                                      //
 //////////////////////////////////////////////////////////
 // ✅ FIX ChatGPT : tous les input SONT déclarés AVANT tout #include
-// qui les utilise (notamment Strategy.mqh et Scanner_fibo.mqh qui
-// référencent K_Fibo_TF, K_PivotBars, K_Fibo_Retracement,
-// K_Fibo_TP_R, K_One_Trade_Per_Day).
+// qui les utilise.
 //========================================================
 input uint                I_TAILLE_DU_COMPTE     = 25000;          // Taille du compte de trading (balance initiale)
 input ENUM_BALANCE_MODE   K_BalanceMode            = eBM_Compound;  // Mode de calcul du risque
@@ -82,15 +80,6 @@ input ENUM_VISU           I_Visu_Height          = eV_Nothing;    // Taille affi
 input uint                I_Deviation            = 10;            // Slippage autorisé
 input string              I_Symbol_Name          = "US100m";      // Symbole exact dans MT5 (guard dans OnInit)
 input double              K_Max_Risk_Auth        = 2.5;           // Risque max autorisé pour fallback MinLot (%)
-
-//============================================
-//---  Paramètres FIBO SCANNER SOLO (stratégie active)
-//============================================
-input ENUM_TIMEFRAMES    K_Fibo_TF               = PERIOD_H1;   // Timeframe du Fibo (H1 par défaut)
-input uint                K_PivotBars             = 2;            // Bougies de confirmation pivot (chaque côté)
-input double              K_Fibo_Retracement      = 0.382;        // Ratio de retracement d'entrée (38.2%)
-input double              K_Fibo_TP_R             = 3.0;          // Objectif TP en R
-input bool                K_One_Trade_Per_Day     = false;        // Verrou 1 trade/jour/scanner (Pine-fidèle = false)
 
 //////////////////////////////////////////////////////////
 //                                                      //
@@ -112,8 +101,8 @@ input bool                K_One_Trade_Per_Day     = false;        // Verrou 1 tr
 // Architecture Koenigin :
 //   - Strategy.mqh     : la LIAISON (orchestre les scanners, envoie les ordres)
 //   - Scanner.mqh      : TEMPLATE de base (classe CScanner concrète)
-//   - Scanner_fibo.mqh : scanner concret CScannerFibo (logique Fibo 38.2% / 3R)
-//   - Plus tard : Scanner_opr.mqh (CScannerOPR), Scanner_xxx.mqh, ...
+//   - Scanner_fibo.mqh : scanner concret CScannerFibo (MODÈLE — non branché)
+//   - À brancher : Scanner_ema50.mqh (CScannerEma50), Scanner_xxx.mqh, ...
 // =====================================================================
 #include <OPR_Bot/Strategy.mqh>
 
@@ -341,11 +330,11 @@ void OnTick()
    STRAT.ManagePositions();
 
    // ✅ FIX ChatGPT #2 : Detection() à chaque tick.
-   // Strategy décide en interne s'il y a une nouvelle bougie sur
-   // K_Fibo_TF (anti-rejeu basé sur iTime(Symbol(), K_Fibo_TF, 0),
+   // Strategy décide en interne s'il y a une nouvelle bougie sur le
+   // TF du scanner (anti-rejeu basé sur iTime(Symbol(), TF, 0),
    // pas sur PERIOD_CURRENT). Comme ça, l'EA peut être attachée
    // sur n'importe quel TF de chart (M15, H1, H4) et le scanner
-   // H1 sera quand même appelé à chaque clôture H1.
+   // sera quand même appelé à chaque clôture de son TF.
    //------------------------------------------------------------------
    STRAT.Detection();
 }
