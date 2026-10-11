@@ -1,23 +1,29 @@
 //+------------------------------------------------------------------+
 //|                                                                  |
-//| Scanner_rsi7.mqh — SCANNER RSI7 SOLO (divergence cachée, LONG)   |
+//| Scanner_rsi7.mqh — SCANNER RSI7 SOLO (div. cachée LONG + SHORT)  |
 //|                                                                  |
 //| Adaptation du script Pine "SCANNER RSI7 | OR H1 | Divergence     |
 //| cachee | SOLO" (03_RSI7_OR_SOLO.pine) dans l'architecture        |
 //| parallèle multi-scanners de Koenigin.                            |
 //|                                                                  |
 //| - Classe CONCRETE CScannerRsi7 (pas d'héritage, pas de virtual) |
-//| - LONG UNIQUEMENT : divergence cachée haussière (le Pine est     |
-//|   long uniquement — PAS d'option short : un miroir baissier     |
-//|   serait inventé, aucune référence Pine)                        |
+//| - LONG : divergence cachée haussière — toujours actif (le Pine  |
+//|   d'origine est long uniquement, fidélité Pine stricte)         |
+//| - SHORT : divergence cachée baissière (miroir exact du long)    |
+//|   — OPTIONNEL, input K_RSI7_Short = false par défaut (off =     |
+//|   fidélité Pine : aucune référence baissière dans le .pine)     |
+//|   Machine à pivots HAUTS indépendante de la machine basse       |
 //| - Divergence cachée haussière = prix creux PLUS HAUT + RSI      |
 //|   creux PLUS BAS, entre pivots ADJACENTS uniquement             |
+//| - Divergence cachée baissière = prix sommet PLUS BAS + RSI      |
+//|   sommet PLUS HAUT (miroir, entre pivots hauts adjacents)       |
 //| - Pivots 7 barres STRICTS : low[3] strictement plus bas que     |
 //|   ses 6 voisines (égalité low[j] <= low[3] → PAS un pivot)      |
 //| - Gap entre pivots : 5 à 60 BARRES inclus (comptage en barres,  |
 //|   pas en temps horloge — un week-end ne gonfle pas le gap)      |
-//| - SL = plus bas des N bougies, bougie signal INCLUSE            |
-//| - TP = 3R (Pine : entry + 3*(entry-sl))                         |
+//| - SL = plus bas des N bougies, bougie signal INCLUSE (short :   |
+//|   plus HAUT)                                                     |
+//| - TP = 3R (Pine : entry + 3*(entry-sl) ; short : bid - 3R)       |
 //| - 1 trade simultané max (HasPositionForSymbol) — le verrou SOLO |
 //|   ... et UNIQUEMENT si sélectionné dans le panier (K_RSI7_Trade)|
 //| - Entrée au marché (IsMarketOrder = true) au 1er tick qui suit  |
@@ -127,6 +133,15 @@ input ENUM_TIMEFRAMES    K_RSI7_TF      = PERIOD_H1;   // TF de travail (Pine : 
 input uint               K_RSI7_Period  = 7;           // Période RSI (Pine : 7)
 input uint               K_RSI7_SL_Bars = 10;          // Plus bas de combien de bougies pour le SL (Pine : 10)
 input double             K_RSI7_TP_R    = 3.0;         // Objectif TP en R (Pine : 3R)
+// SHORT OPTIONNEL : le Pine d'origine est long uniquement (divergence
+// cachée haussière, Pine l.50). K_RSI7_Short=true ajoute le miroir :
+// divergence cachée baissière = pivot HAUT 7 barres strict (égalité
+// high[j] >= high[3] → pas de pivot), gap 5-60 barres, prix sommet
+// PLUS BAS + RSI sommet PLUS HAUT ; SL = plus HAUT des N bougies ;
+// TP = bid - 3R. Machine à pivots haute INDÉPENDANTE de la machine
+// basse (deux états prev* distincts, aucune interaction). False par
+// défaut = fidélité Pine et bit-identique au comportement validé.
+input bool               K_RSI7_Short   = false;       // Activer short (Pine : long uniquement)
 
 //////////////////////////////////////////////////////////
 //                                                      //
@@ -175,6 +190,21 @@ private:
     // la bougie : recalculée à chaque clôture, consommée une fois)
     //----------------------------------------------------------------
     bool            m_Divergence;
+
+    // === ÉTAT PERSISTANT SHORT (miroir, pivots HAUTS) ===
+    // Machine à pivots INDÉPENDANTE de la machine basse : sommets et
+    // creux forment deux suites de pivots DISTINCTES, chacune avec
+    // son prev* (comparaisons entre pivots ADJACENTS au sein de SA
+    // suite uniquement — le miroir du long est structurellement
+    // isolé : aucune variable partagée avec la machine basse).
+    // Ne vit que si K_RSI7_Short=true (sinon jamais mise à jour,
+    // zéro signal court — bit-identique au long-only validé).
+    //------------------------------------------------------------------
+    bool            m_HavePrevS;        // Équivalent Pine "not na(prevBar)" — suite haute
+    double          m_PrevPriceS;       // high du pivot haut précédent
+    double          m_PrevRsiS;         // RSI du pivot haut précédent
+    datetime        m_PrevBarTimeS;     // open-time de la bougie pivot haut précédente
+    bool            m_DivergenceShort;  // divergence cachée BAISSIÈRE confirmée à la dernière clôture
 
     //+--------------------------------------------------------+
     //| DetectPivot (privé)                                     |
@@ -305,6 +335,114 @@ private:
     }
 
     //+--------------------------------------------------------+
+    //| DetectPivotShort (privé)                                |
+    //| Miroir EXACT de DetectPivot sur les SOMMETS : pivot     |
+    //| haut 7 barres STRICT centré [3], divergence cachée      |
+    //| BAISSIÈRE vs pivot haut précédent, maj prev*S à CHAQUE  |
+    //| pivot haut.                                              |
+    //|                                                        |
+    //| Aucune référence Pine (le .pine est long uniquement) :  |
+    //| chaque règle est le miroir symétrique du long —          |
+    //|   pivot  : high[j] >= high[c] → FAUX (égalité rejetée,   |
+    //|            miroir du <= long)                            |
+    //|   diverg : high[c] < prevPrixS (sommet PLUS BAS)         |
+    //|            ET rsi[c] > prevRsiS (RSI sommet PLUS HAUT)   |
+    //|   gap    : identique au long, [5,60] barres incluses     |
+    //|                                                        |
+    //| Utilisé par le chemin LIVE et le backfill, comme le     |
+    //| long → un seul code, zéro dérive entre les deux chemins. |
+    //+--------------------------------------------------------+
+    void DetectPivotShort(const double   &i_highs[],
+                          const datetime &i_times[],
+                          const double   &i_rsis[],
+                          const int       i_conf_shift,
+                          const bool      i_log)
+    {
+        // Bougie pivot candidate = 3 barres avant la confirmée (miroir high[3])
+        //----------------------------------------------------------------------
+        int c = i_conf_shift + RSI7_PIVOT_SHIFT;
+
+        // === PIVOT HAUT STRICT 7 BOUGIES (miroir du long) ===
+        // Le candidat doit être STRICTEMENT plus haut que ses 6 voisines.
+        // RQ : égalité high[j] == high[candidat] → PAS un pivot (miroir
+        // du rejet <= du long). Fréquent sur l'or aux ronds.
+        //--------------------------------------------------------------
+        bool pivot = true;
+        for (int j = i_conf_shift; j <= i_conf_shift + 2 * RSI7_PIVOT_SHIFT; j++)
+        {
+            if (j == c) continue;
+            if (i_highs[j] >= i_highs[c])
+            {
+                pivot = false;
+                break;
+            }
+        }
+        if (!pivot) return;
+
+        // === ÉCART AVEC LE PIVOT HAUT PRÉCÉDENT (barres, miroir du long) ===
+        //----------------------------------------------------------------------
+        int gap = -1;
+        if (m_HavePrevS)
+        {
+            int prev_shift = iBarShift(Symbol(), m_TF, m_PrevBarTimeS, true);
+            if (prev_shift >= 0) gap = prev_shift - c;
+        }
+
+        // === DIVERGENCE CACHÉE BAISSIÈRE (miroir du long) ===
+        // Pivots hauts ADJACENTS uniquement, bornes [5,60] INCLUSES,
+        // prix sommet PLUS BAS + RSI sommet PLUS HAUT.
+        //--------------------------------------------------------
+        m_DivergenceShort = (m_HavePrevS
+                             && gap >= RSI7_GAP_MIN && gap <= RSI7_GAP_MAX
+                             && i_highs[c] < m_PrevPriceS
+                             && i_rsis[c] > m_PrevRsiS);
+
+        // Journal live (miroir de la checklist long)
+        //----------------------------------------------
+        if (i_log)
+        {
+            if (m_DivergenceShort)
+            {
+                LOG.INFO(m_Name + " : DIVERGENCE cachée baissière | pivot " +
+                         TimeToString(i_times[c], TIME_DATE | TIME_MINUTES) +
+                         " high=" + DoubleToString(i_highs[c], _Digits) +
+                         " (précédent " + DoubleToString(m_PrevPriceS, _Digits) + ")" +
+                         " | RSI=" + DoubleToString(i_rsis[c], 2) +
+                         " (précédent " + DoubleToString(m_PrevRsiS, 2) + ")" +
+                         " | gap=" + IntegerToString(gap) + " bougies", __FUNCTION__);
+            }
+            else
+            {
+                string why;
+                if (!m_HavePrevS)                    why = "premier pivot haut (pas de précédent)";
+                else if (gap < 0)                    why = "pivot haut précédent introuvable dans l'historique";
+                else if (gap < RSI7_GAP_MIN)         why = "gap " + IntegerToString(gap) + " < " + IntegerToString(RSI7_GAP_MIN);
+                else if (gap > RSI7_GAP_MAX)         why = "gap " + IntegerToString(gap) + " > " + IntegerToString(RSI7_GAP_MAX);
+                else if (i_highs[c] >= m_PrevPriceS) why = "prix sommet pas plus bas (" +
+                                                            DoubleToString(i_highs[c], _Digits) + " >= " +
+                                                            DoubleToString(m_PrevPriceS, _Digits) + ")";
+                else                                 why = "RSI sommet pas plus haut (" +
+                                                            DoubleToString(i_rsis[c], 2) + " <= " +
+                                                            DoubleToString(m_PrevRsiS, 2) + ")";
+
+                LOG.INFO(m_Name + " : pivot haut confirmé " +
+                         TimeToString(i_times[c], TIME_DATE | TIME_MINUTES) +
+                         " high=" + DoubleToString(i_highs[c], _Digits) +
+                         " RSI=" + DoubleToString(i_rsis[c], 2) +
+                         " — pas de divergence (" + why + ")", __FUNCTION__);
+            }
+        }
+
+        // === MISE À JOUR DE L'ÉTAT À CHAQUE PIVOT HAUT ===
+        // Divergent OU NON : le prochain pivot haut se comparera à CELUI-CI.
+        //-----------------------------------------------------------------------
+        m_PrevPriceS   = i_highs[c];
+        m_PrevRsiS     = i_rsis[c];
+        m_PrevBarTimeS = i_times[c];
+        m_HavePrevS    = true;
+    }
+
+    //+--------------------------------------------------------+
     //| TryBackfill (privé)                                     |
     //| Replay des confirmations HISTORIQUES pour initialiser   |
     //| l'état pivots — l'équivalent du chargement d'historique  |
@@ -347,33 +485,57 @@ private:
         if (CopyTime(Symbol(), m_TF, 0, n, times) < n) return(false);
         if (CopyBuffer(m_HandleRSI, 0, 0, n, rsis) < n) return(false);   // RSI pas prêt → retry
 
+        // Machine haute (short) : mêmes données en miroir — copie et
+        // replay UNIQUEMENT si K_RSI7_Short (sinon état haute vierge,
+        // zéro travail, bit-identique au long-only).
+        //---------------------------------------------------------------
+        double highs[];
+        ArraySetAsSeries(highs, true);
+        bool short_on = K_RSI7_Short;
+        if (short_on && CopyHigh(Symbol(), m_TF, 0, n, highs) < n) return(false);
+
         // Replay chronologique des confirmations passées (shifts ≥ 2) :
         // DetectPivot met l'état à jour à CHAQUE pivot rencontré. Un pivot
         // est compté quand l'état a bougé (temps du pivot précédent changé).
         //----------------------------------------------------------------------
         int pivots_found = 0;
+        int pivots_high_found = 0;
         for (int s = n - (2 * RSI7_PIVOT_SHIFT + 1); s >= 2; s--)
         {
             datetime prev_time_before = m_PrevBarTime;
             DetectPivot(lows, times, rsis, s, false);
             if (m_PrevBarTime != prev_time_before) pivots_found++;
+
+            if (short_on)
+            {
+                datetime prev_time_before_s = m_PrevBarTimeS;
+                DetectPivotShort(highs, times, rsis, s, false);
+                if (m_PrevBarTimeS != prev_time_before_s) pivots_high_found++;
+            }
         }
 
-        // Le replay peut avoir posé m_Divergence sur la DERNIÈRE confirmation
-        // historique (s=2) : on l'annule — seule la confirmation LIVE de la
-        // bougie shift 1 (traitée juste après, par UpdateState) a le droit de
-        // poser le drapeau. Sans ça, un signal périmé pourrait être consommé
-        // si la bougie courante ne confirme aucun pivot.
+        // Le replay peut avoir posé m_Divergence (ou Short) sur la DERNIÈRE
+        // confirmation historique (s=2) : on les annule — seule la
+        // confirmation LIVE de la bougie shift 1 (traitée juste après, par
+        // UpdateState) a le droit de poser les drapeaux. Sans ça, un signal
+        // périmé pourrait être consommé si la bougie courante ne confirme
+        // aucun pivot.
         //----------------------------------------------------------------------
-        m_Divergence = false;
+        m_Divergence      = false;
+        m_DivergenceShort = false;
 
         m_BackfillDone = true;
         LOG.INFO(m_Name + " : backfill pivots OK — " + IntegerToString(n) +
                  " bougies rejouées, " + IntegerToString(pivots_found) + " pivots" +
+                 (short_on ? (" + " + IntegerToString(pivots_high_found) + " pivots hauts (short)") : "") +
                  (m_HavePrev ? (", dernier pivot " + TimeToString(m_PrevBarTime, TIME_DATE | TIME_MINUTES) +
                                 " low=" + DoubleToString(m_PrevPrice, _Digits) +
                                 " RSI=" + DoubleToString(m_PrevRsi, 2))
-                            : ", aucun pivot (état vide)"), __FUNCTION__);
+                            : ", aucun pivot (état vide)") +
+                 (short_on ? (m_HavePrevS ? (", dernier pivot haut " + TimeToString(m_PrevBarTimeS, TIME_DATE | TIME_MINUTES) +
+                                " high=" + DoubleToString(m_PrevPriceS, _Digits) +
+                                " RSI=" + DoubleToString(m_PrevRsiS, 2))
+                            : ", aucun pivot haut (état haute vide)") : ""), __FUNCTION__);
         return(true);
     }
 
@@ -395,14 +557,22 @@ public:
         m_TF        = i_tf;
         m_HandleRSI = INVALID_HANDLE;
 
-        // État pivots vierge (Pine : var prev* = na)
-        //----------------------------------------------
+        // État pivots vierge (Pine : var prev* = na) — machine basse LONG
+        //--------------------------------------------------------------
         m_BackfillDone = false;
         m_HavePrev     = false;
         m_PrevPrice    = 0.0;
         m_PrevRsi      = 0.0;
         m_PrevBarTime  = 0;
         m_Divergence   = false;
+
+        // État pivots vierge — machine haute SHORT (miroir)
+        //-----------------------------------------------------
+        m_HavePrevS      = false;
+        m_PrevPriceS     = 0.0;
+        m_PrevRsiS       = 0.0;
+        m_PrevBarTimeS   = 0;
+        m_DivergenceShort = false;
 
         m_HandleRSI = iRSI(Symbol(), m_TF, (int)K_RSI7_Period, PRICE_CLOSE);
         if (m_HandleRSI == INVALID_HANDLE)
@@ -418,7 +588,8 @@ public:
                  ", SL_Bars=" + IntegerToString((int)K_RSI7_SL_Bars) +
                  ", TP_R=" + DoubleToString(K_RSI7_TP_R, 2) +
                  ", gap pivots [" + IntegerToString(RSI7_GAP_MIN) + ".." + IntegerToString(RSI7_GAP_MAX) + "]" +
-                 ", LONG uniquement)", __FUNCTION__);
+                 (K_RSI7_Short ? ", LONG + SHORT (miroir baissier)"
+                               : ", LONG uniquement"), __FUNCTION__);
         return(true);
     }
 
@@ -459,8 +630,11 @@ public:
     {
         // La divergence est une propriété de LA bougie qui vient de
         // clôturer : recalculée à chaque appel, consommée par GetSignal.
+        // Les deux machines (basse/long, haute/short) posent leur propre
+        // drapeau — indépendants l'un de l'autre.
         //----------------------------------------------------------------
-        m_Divergence = false;
+        m_Divergence      = false;
+        m_DivergenceShort = false;
 
         // Backfill paresseux (une fois) : données async → retry à la bougie suivante
         //-----------------------------------------------------------------------------
@@ -479,9 +653,11 @@ public:
         int window = 2 * RSI7_PIVOT_SHIFT + 2;   // = 8
 
         double   lows[];
+        double   highs[];   // machine haute (short) — copiée si K_RSI7_Short
         datetime times[];
         double   rsis[];
         ArraySetAsSeries(lows,  true);
+        ArraySetAsSeries(highs, true);
         ArraySetAsSeries(times, true);
         ArraySetAsSeries(rsis,  true);
 
@@ -492,6 +668,27 @@ public:
         // Confirmation de la bougie shift 1 → candidat pivot shift 4
         //--------------------------------------------------------------
         DetectPivot(lows, times, rsis, 1, true);
+
+        // Machine haute (short) : même confirmation, miroir sur les highs.
+        // TOUJOURS APRÈS le long (invariant de non-régression : la machine
+        // basse ne peut jamais être perturbée par la machine haute — si
+        // les highs manquent, le short saute CETTE confirmation, le long
+        // a déjà été traité). Symétrie de traitement : indisponibilité
+        // = bougie non traitée pour la machine concernée (même mode de
+        // défaillance que le long quand CopyLow échoue ; en pratique
+        // CopyLow/CopyHigh lisent la même historique et échouent ensemble).
+        //---------------------------------------------------------------------
+        if (K_RSI7_Short)
+        {
+            if (CopyHigh(Symbol(), m_TF, 0, window, highs) < window)
+            {
+                LOG.WARNING(m_Name + " : CopyHigh indisponible — machine courte sautée cette bougie", __FUNCTION__);
+            }
+            else
+            {
+                DetectPivotShort(highs, times, rsis, 1, true);
+            }
+        }
     }
 
     //+--------------------------------------------------------+
@@ -532,10 +729,17 @@ public:
     //|   - divergence         → drapeau posé par UpdateState à |
     //|                          la clôture de CETTE bougie     |
     //|   - close-stop>mintick → risk = ask - SL > tick size    |
+    //|                          (short : sl - bid > tick size) |
     //|                                                        |
     //| SL : plus bas des K_RSI7_SL_Bars bougies, bougie signal |
     //| incluse (Pine : ta.lowest(low,10) — shift 1..10).       |
     //| TP : entry + K_RSI7_TP_R * risk (Pine : 3R).            |
+    //| SHORT (miroir, K_RSI7_Short) : divergence cachée        |
+    //| baissière → SL = plus HAUT des N bougies, entrée = bid, |
+    //| TP = bid - K_RSI7_TP_R * risk. Exclusion mutuelle des   |
+    //| deux drapeaux : le pivot candidat (même bougie pour les  |
+    //| deux machines) ne peut pas être ET le plus bas ET le    |
+    //| plus haut STRICT de ses 6 voisines.                      |
     //|                                                        |
     //| INPUT:                                                   |
     //|   i_tick : tick courant (ask réel d'exécution)          |
@@ -554,9 +758,24 @@ public:
         if (Bars(Symbol(), m_TF) < RSI7_WARMUP_BARS) return(false);
 
         // Divergence cachée confirmée à la clôture de la bougie signal ?
+        // LONG = haussière (machine basse, Pine) ; SHORT = baissière
+        // (machine haute, miroir — gated par K_RSI7_Short).
+        // Exclusion mutuelle : les deux drapeaux sont posés par le pivot
+        // de la MÊME bougie candidate (shift conf+3), qui ne peut pas
+        // être à la fois le plus bas ET le plus haut strict de ses 6
+        // voisines → jamais deux sens le même tick.
         //-----------------------------------------------------------------
-        if (!m_Divergence) return(false);
+        bool go_long  = m_Divergence;
+        bool go_short = K_RSI7_Short && m_DivergenceShort;
+        if (!go_long && !go_short) return(false);
 
+        // Tick size (filtre anti-risque-nul, commun aux deux sens)
+        //-----------------------------------------------------------
+        double min_tick = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_SIZE);
+        if (min_tick <= 0.0) min_tick = _Point;
+
+        if (go_long)
+        {
         // === SL = PLUS BAS DES N BOUGIES, BOUGIE SIGNAL INCLUSE ===
         // (Pine : stopCandidate = ta.lowest(low,10) sur la bougie de
         //  signal — iLowest(shift 1, count N) couvre les shifts 1..N)
@@ -574,14 +793,11 @@ public:
         // === FILTRE ANTI-RISQUE-NUL ===
         // (Pine : close - stopCandidate > syminfo.mintick)
         //----------------------------------------------------
-        double min_tick = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_SIZE);
-        if (min_tick <= 0.0) min_tick = _Point;
-
         double risk = entry - sl;
         if (risk <= min_tick) return(false);
 
         // === SIGNAL D'ACHAT → REMPLIR STRUCT_STRATEGY ===
-        // (LONG UNIQUEMENT : le Pine n'a pas de miroir baissier)
+        // (LONG : divergence cachée haussière, Pine l.94-97)
         //----------------------------------------------------------
         ZeroMemory(o_datas);
         o_datas.Trend         = eT_Bull;
@@ -594,6 +810,46 @@ public:
                  IntegerToString((int)K_RSI7_SL_Bars) + " bars=" +
                  DoubleToString(sl, _Digits) +
                  " | Ask=" + DoubleToString(entry, _Digits) +
+                 " | TP=" + DoubleToString(o_datas.TakeProfit, _Digits) +
+                 " | R=" + DoubleToString(K_RSI7_TP_R, 2),
+                 __FUNCTION__);
+        return(true);
+        }
+
+        // === SHORT : MIROIR EXACT DU LONG (divergence baissière) ===
+        //--------------------------------------------------------------
+        // SL = plus HAUT des N bougies (bougie signal incluse) ;
+        // entrée = bid réel ; TP = entry - K_RSI7_TP_R R (sous
+        // l'entrée). Verrou SOLO partagé : une position à la fois,
+        // long OU short (HasPositionForSymbol ne distingue pas le
+        // sens — sémantique identique à l'option short EMA50).
+        //--------------------------------------------------------------
+        int highest_idx = iHighest(Symbol(), m_TF, MODE_HIGH, (int)K_RSI7_SL_Bars, 1);
+        if (highest_idx < 0) return(false);
+        double sl = iHigh(Symbol(), m_TF, highest_idx);
+
+        // Entrée = bid réel (miroir de l'ask long)
+        //--------------------------------------------
+        double entry = i_tick.bid;
+
+        // Filtre anti-risque-nul, sens short : sl - entry > mintick
+        //-------------------------------------------------------------
+        double risk = sl - entry;
+        if (risk <= min_tick) return(false);
+
+        // === SIGNAL DE VENTE → REMPLIR STRUCT_STRATEGY ===
+        //----------------------------------------------------------
+        ZeroMemory(o_datas);
+        o_datas.Trend         = eT_Bear;
+        o_datas.Entry         = entry;                        // entrée marché au prix courant
+        o_datas.StopLoss      = sl;                           // plus haut des N bougies
+        o_datas.TakeProfit    = entry - K_RSI7_TP_R * risk;   // TP = K_RSI7_TP_R R sous l'entrée
+        o_datas.IsMarketOrder = true;                         // ordre au marché
+
+        LOG.INFO(m_Name + " : RSI7 VENTE divergence cachée baissière | SL " +
+                 IntegerToString((int)K_RSI7_SL_Bars) + " bars=" +
+                 DoubleToString(sl, _Digits) +
+                 " | Bid=" + DoubleToString(entry, _Digits) +
                  " | TP=" + DoubleToString(o_datas.TakeProfit, _Digits) +
                  " | R=" + DoubleToString(K_RSI7_TP_R, 2),
                  __FUNCTION__);

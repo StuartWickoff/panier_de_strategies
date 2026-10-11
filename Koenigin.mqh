@@ -109,8 +109,10 @@ input double              K_Max_Risk_Auth        = 2.5;           // Risque max 
 //     TP 2R) — BRANCHÉ, trade soumis à sélection panier (K_EMA50_Trade, false par défaut)
 //   - Scanner_rsi7.mqh : scanner concret CScannerRsi7 (RSI7 divergence
 //     cachée haussière sur pivots 7 barres stricts / gap 5-60 / SL
-//     lowest N / TP 3R / long uniquement, scanner À ÉTAT avec
-//     UpdateState avant filtres + backfill historique) — BRANCHÉ, trade
+//     lowest N / TP 3R / long + short optionnel K_RSI7_Short (div.
+//     cachée baissière, machine à pivots hauts indépendante),
+//     scanner À ÉTAT avec UpdateState avant filtres + backfill
+//     historique) — BRANCHÉ, trade
 //     soumis à sélection panier (K_RSI7_Trade, false par défaut)
 //   - Scanner_fibo.mqh  : scanner concret CScannerFibo (MODÈLE — non branché)
 //   - Plus tard : Scanner_xxx.mqh, ...

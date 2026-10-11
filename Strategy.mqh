@@ -453,8 +453,9 @@ void CStrategy::TryEma50(const MqlTick &i_tick)
 //| Orchestration du scanner RSI7 :                                   |
 //|   1. Verrou SOLO (position ouverte → pas de nouvelle entrée,      |
 //|      Pine : "not active" — filtré par LE nom de CE scanner)      |
-//|   2. GetSignal() — divergence cachée haussière confirmée à la     |
-//|      clôture ; SL = plus bas N bougies ; TP = 3R ; LONG uniquement |
+//|   2. GetSignal() — divergence cachée confirmée à la clôture ;    |
+//|      SL = extrême N bougies ; TP = 3R ; long (div. haussière)    |
+//|      + short optionnel (div. baissière, input K_RSI7_Short)      |
 //|   3. Si signal → ExecuteSignal                                     |
 //|                                                                  |
 //| Note : l'état pivots (prev*) vit dans UpdateState(), appelé à      |
