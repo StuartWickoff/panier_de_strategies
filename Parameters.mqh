@@ -211,6 +211,6 @@ public:
 //                                                      //
 //////////////////////////////////////////////////////////
 
-#include <OPR_Bot/Parameters_public.mqh>
+#include <Koenigin/Parameters_public.mqh>
 
-#include <OPR_Bot/Parameters_private.mqh>
+#include <Koenigin/Parameters_private.mqh>

@@ -47,7 +47,7 @@
 // 1. Type.mqh en premier : fournit les ENUM_* utilisés par les input
 //    (ENUM_LOG_LEVEL, ENUM_VISU, ENUM_TIMEFRAMES, ENUM_APPLIED_PRICE,
 //     ENUM_TREND, STRUCT_STRATEGY, etc.)
-#include <OPR_Bot/Type.mqh>
+#include <Koenigin/Type.mqh>
 
 //////////////////////////////////////////////////////////
 //                                                      //
@@ -91,15 +91,15 @@ input double              K_Max_Risk_Auth        = 2.5;           // Risque max 
 //////////////////////////////////////////////////////////
 // Maintenant on peut inclure le reste du framework + Strategy.mqh
 // qui utilise les input ci-dessus.
-#include <OPR_Bot/Tools.mqh>
-#include <OPR_Bot/Log.mqh>
-#include <OPR_Bot/Alert.mqh>
-#include <OPR_Bot/Parameters.mqh>
-#include <OPR_Bot/Context.mqh>
-#include <OPR_Bot/Money.mqh>
-#include <OPR_Bot/Visu.mqh>
-#include <OPR_Bot/Monitoring.mqh>
-#include <OPR_Bot/Broker.mqh>
+#include <Koenigin/Tools.mqh>
+#include <Koenigin/Log.mqh>
+#include <Koenigin/Alert.mqh>
+#include <Koenigin/Parameters.mqh>
+#include <Koenigin/Context.mqh>
+#include <Koenigin/Money.mqh>
+#include <Koenigin/Visu.mqh>
+#include <Koenigin/Monitoring.mqh>
+#include <Koenigin/Broker.mqh>
 // =====================================================================
 // Architecture Koenigin :
 //   - Strategy.mqh     : la LIAISON (orchestre les scanners, envoie les ordres)
@@ -109,7 +109,7 @@ input double              K_Max_Risk_Auth        = 2.5;           // Risque max 
 //   - Scanner_fibo.mqh  : scanner concret CScannerFibo (MODÈLE — non branché)
 //   - Plus tard : Scanner_xxx.mqh, ...
 // =====================================================================
-#include <OPR_Bot/Strategy.mqh>
+#include <Koenigin/Strategy.mqh>
 
 
 //////////////////////////////////////////////////////////

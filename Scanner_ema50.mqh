@@ -78,9 +78,9 @@ input double             K_EMA50_TP_R    = 2.0;         // Objectif TP en R (Pin
 //                 I N C L U D E S                      //
 //                                                      //
 //////////////////////////////////////////////////////////
-#include <OPR_Bot/Type.mqh>
-#include <OPR_Bot/Log.mqh>
-#include <OPR_Bot/Tools.mqh>
+#include <Koenigin/Type.mqh>
+#include <Koenigin/Log.mqh>
+#include <Koenigin/Tools.mqh>
 
 
 //////////////////////////////////////////////////////////

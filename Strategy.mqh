@@ -35,25 +35,25 @@
 //                 I N C L U D E S                      //
 //                                                      //
 //////////////////////////////////////////////////////////
-#include <OPR_Bot/Type.mqh>
-#include <OPR_Bot/Tools.mqh>
-#include <OPR_Bot/Log.mqh>
-#include <OPR_Bot/Alert.mqh>
-#include <OPR_Bot/Parameters.mqh>
-#include <OPR_Bot/Context.mqh>
-#include <OPR_Bot/Money.mqh>
-#include <OPR_Bot/Visu.mqh>
-#include <OPR_Bot/Monitoring.mqh>
-#include <OPR_Bot/Broker.mqh>
-#include <OPR_Bot/Datas.mqh>
+#include <Koenigin/Type.mqh>
+#include <Koenigin/Tools.mqh>
+#include <Koenigin/Log.mqh>
+#include <Koenigin/Alert.mqh>
+#include <Koenigin/Parameters.mqh>
+#include <Koenigin/Context.mqh>
+#include <Koenigin/Money.mqh>
+#include <Koenigin/Visu.mqh>
+#include <Koenigin/Monitoring.mqh>
+#include <Koenigin/Broker.mqh>
+#include <Koenigin/Datas.mqh>
 
 // === Scanner(s) enregistrés ===
 // Chaque scanner est une classe concrete (pas d'héritage).
 // On include son fichier pour pouvoir le déclarer en membre.
 // Le scanner apporte SES inputs dans SON fichier (auto-contenu).
-#include <OPR_Bot/Scanner_ema50.mqh>
+#include <Koenigin/Scanner_ema50.mqh>
 // Pour en brancher un autre :
-// #include <OPR_Bot/Scanner_xxx.mqh>
+// #include <Koenigin/Scanner_xxx.mqh>
 
 
 //////////////////////////////////////////////////////////

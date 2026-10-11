@@ -48,9 +48,9 @@
 //                 I N C L U D E S                      //
 //                                                      //
 //////////////////////////////////////////////////////////
-#include <OPR_Bot/Type.mqh>
-#include <OPR_Bot/Log.mqh>
-#include <OPR_Bot/Tools.mqh>
+#include <Koenigin/Type.mqh>
+#include <Koenigin/Log.mqh>
+#include <Koenigin/Tools.mqh>
 
 
 //////////////////////////////////////////////////////////
