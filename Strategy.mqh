@@ -8,7 +8,8 @@
 //|   - Détient les ressources partagées (CDatas DATAS)              |
 //|   - Détient un ou plusieurs membres scanner EXPLICITES          |
 //|     (ici : CScannerEma50 m_Ema50Scanner)                       |
-//|   - Detection() appelle chaque scanner via TryXxx()              |
+//|   - Detection() appelle chaque scanner SÉLECTIONNÉ via TryXxx()  |
+//|     (panier : K_EMA50_Trade, false par défaut — greffé ≠ tradé)  |
 //|   - ManagePositions() délègue à scanner.OnTick()                 |
 //|   - SetTicket/GetPositionNb/DeleteDetection/CloseOfPositions    |
 //|     → délèguent à DATAS partagé                                  |
@@ -17,8 +18,9 @@
 //| scanners. Strategy ne sait PAS ce que fait un scanner, il       |
 //| appelle juste Detect() et relaie au broker.                      |
 //|                                                                  |
-//| Ajouter un scanner = créer Scanner_xxx.mqh + ajouter un membre  |
-//| + ajouter une méthode TryXxx() + l'appeler dans Detection().    |
+//| Ajouter un scanner = créer Scanner_xxx.mqh (avec son toggle
+//| K_Xxx_Trade=false) + ajouter un membre + une méthode TryXxx()
+//| + l'appeler dans Detection() sous if (K_Xxx_Trade).
 //| On ne touche PAS aux autres scanners.                            |
 //|                                                                  |
 //+------------------------------------------------------------------+
@@ -50,7 +52,8 @@
 // === Scanner(s) enregistrés ===
 // Chaque scanner est une classe concrete (pas d'héritage).
 // On include son fichier pour pouvoir le déclarer en membre.
-// Le scanner apporte SES inputs dans SON fichier (auto-contenu).
+// Le scanner apporte SES inputs dans SON fichier (auto-contenu),
+// dont son toggle de sélection K_Xxx_Trade (panier).
 #include <Koenigin/Scanner_ema50.mqh>
 // Pour en brancher un autre :
 // #include <Koenigin/Scanner_xxx.mqh>
@@ -128,6 +131,14 @@ public:
             return(false);
         }
 
+        // PANIER : annonce une fois le statut de chaque scanner
+        // (greffé ≠ tradé — mémorisé dans le journal au démarrage)
+        //------------------------------------------------------------------
+        if (K_EMA50_Trade)
+            LOG.INFO(DATAS.GetStrategyName() + "Panier : EMA50 SOLO sélectionné (K_EMA50_Trade=true) — trade ACTIF", __FUNCTION__);
+        else
+            LOG.INFO(DATAS.GetStrategyName() + "Panier : EMA50 SOLO non sélectionné (K_EMA50_Trade=false) — DORMANT, aucun trade", __FUNCTION__);
+
         m_InitOk = true;
         LOG.INFO(DATAS.GetStrategyName() + "Stratégie (liaison) initialisée avec succès", __FUNCTION__);
         return(true);
@@ -184,7 +195,8 @@ public:
     //|   1. Lecture du tick                                     |
     //|   2. Anti-rejeu sur K_EMA50_TF (nouvelle bougie ?)       |
     //|   3. Filtres d'EXÉCUTION (NEWS, heures, jours)          |
-    //|   4. TryEma50() — verrou SOLO + GetSignal                |
+    //|   4. Panier : TryEma50() si sélectionné — verrou SOLO +  |
+    //|      GetSignal                                           |
     //+--------------------------------------------------------+
     void Detection(void)
     {
@@ -234,9 +246,16 @@ public:
             return;
         }
 
-        // === EXÉCUTION DES SCANNERS ===
-        //-------------------------------
-        TryEma50(l_Tick);
+        // === EXÉCUTION DES SCANNERS (PANIER) ===
+        //---------------------------------------
+        // Greffé ≠ tradé : le scanner est câblé en permanence, mais ne
+        // trade QUE s'il est sélectionné (K_EMA50_Trade). Dé-sélectionner
+        // en cours de route stoppe les NOUVELLES entrées ; les positions
+        // déjà ouvertes courent jusqu'à leur SL/TP broker (intouchables).
+        // Un signal émis pendant une période non sélectionnée est une
+        // propriété de la bougie : il ne se rejoue pas (Pine-fidèle).
+        //---------------------------------------------------------------
+        if (K_EMA50_Trade) TryEma50(l_Tick);
     }
 
     //+--------------------------------------------------------+
@@ -368,7 +387,10 @@ void CStrategy::TryEma50(const MqlTick &i_tick)
 
 //+------------------------------------------------------------------+
 //| Ajouter un scanner = définir son TryXxx() ici :                   |
-//|   verrous → m_XxxScanner.GetSignal() → ExecuteSignal() →          |
-//|   m_XxxScanner.RollbackSignal() si le scanner a un état à          |
-//|   restaurer en cas d'échec d'ordre.                              |
+//|   1. Scanner_xxx.mqh : input bool K_Xxx_Trade = false (panier)   |
+//|   2. Detection() : if (K_Xxx_Trade) TryXxx(l_Tick);              |
+//|   3. TryXxx : verrous → m_XxxScanner.GetSignal() →               |
+//|      ExecuteSignal()                                              |
+//|   4. m_XxxScanner.RollbackSignal() si le scanner a un état à      |
+//|      restaurer en cas d'échec d'ordre.                            |
 //+------------------------------------------------------------------+

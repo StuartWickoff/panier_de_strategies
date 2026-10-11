@@ -12,6 +12,7 @@
 //| - SL = plus bas des N dernières bougies, bougie signal incluse   |
 //| - TP = entry + 2R (basé sur ask réel d'exécution)                |
 //| - 1 trade simultané max (HasPositionForSymbol) — le verrou SOLO |
+//|   ... et UNIQUEMENT si sélectionné dans le panier (K_EMA50_Trade) |
 //| - Entrée au marché (IsMarketOrder = true) au 1er tick qui suit   |
 //|   la clôture de la bougie de signal                               |
 //| - Pas de break-even, pas de trailing (fidélité Pine : le bracket|
@@ -68,6 +69,15 @@
 //============================================
 //---   Paramètres SCANNER EMA50 SOLO
 //============================================
+// PANIER DE STRATÉGIES : greffé ≠ tradé.
+// Ce toggle décide si CE scanner trade. Le scanner reste câblé dans
+// Strategy (Config/End/Detection) mais DORMANT tant que la case
+// n'est pas cochée : aucun signal, aucune entrée. Les positions
+// déjà ouvertes avant dé-sélection courent jusqu'à leur SL/TP
+// (portés par le broker — jamais touchées par le toggle).
+// False par défaut : rien ne trade tant que l'utilisateur n'a
+// rien choisi dans le panier.
+input bool               K_EMA50_Trade   = false;       // Panier : trader EMA50 SOLO ?
 input ENUM_TIMEFRAMES    K_EMA50_TF      = PERIOD_H1;   // TF de travail (Pine : TF Valide = H1)
 input uint               K_EMA50_Period  = 50;          // Période EMA (Pine : 50)
 input uint               K_EMA50_SL_Bars = 10;          // Plus bas de combien de bougies pour le SL (Pine : 10)
