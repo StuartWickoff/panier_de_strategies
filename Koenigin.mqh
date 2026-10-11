@@ -111,8 +111,10 @@ input double              K_Max_Risk_Auth        = 2.5;           // Risque max 
 //     cachée haussière sur pivots 7 barres stricts / gap 5-60 / SL
 //     lowest N / TP 3R / long + short optionnel K_RSI7_Short (div.
 //     cachée baissière, machine à pivots hauts indépendante),
-//     scanner À ÉTAT avec UpdateState avant filtres + backfill
-//     historique) — BRANCHÉ, trade
+//     scanner À ÉTAT avec UpdateState avant filtres (contrat bool :
+//     retry au tick suivant tant que la bougie n'est pas traitée,
+//     rattrapage chronologique, pas d'entrée rétroactive au
+//     démarrage) + backfill historique) — BRANCHÉ, trade
 //     soumis à sélection panier (K_RSI7_Trade, false par défaut)
 //   - Scanner_fibo.mqh  : scanner concret CScannerFibo (MODÈLE — non branché)
 //   - Plus tard : Scanner_xxx.mqh, ...

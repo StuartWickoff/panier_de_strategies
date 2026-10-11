@@ -226,7 +226,9 @@ public:
     //| Flux :                                                   |
     //|   1. Lecture du tick                                     |
     //|   2. Anti-rejeu PAR SCANNER (nouvelle bougie sur SON TF ?) |
-    //|   3. État des scanners À ÉTAT (RSI7) — AVANT les filtres |
+    //|   3. État des scanners À ÉTAT (RSI7) — AVANT les filtres, |
+    //|      horodatage validé seulement APRÈS une mise à jour    |
+    //|      réussie (sinon retry au tick suivant — FIX AUDIT 3)  |
     //|   4. Filtres d'EXÉCUTION (NEWS, heures, jours)          |
     //|   5. Panier : TryXxx() des scanners sélectionnés dont    |
     //|      la bougie est nouvelle — verrou SOLO + GetSignal    |
@@ -264,14 +266,18 @@ public:
             l_NewEma50 = true;
         }
 
-        l_BarTime = iTime(Symbol(), K_RSI7_TF, 0);
-        if (l_BarTime == 0)
+        datetime l_Rsi7BarTime = iTime(Symbol(), K_RSI7_TF, 0);
+        if (l_Rsi7BarTime == 0)
         {
             LOG.WARNING(DATAS.GetStrategyName() + "iTime(K_RSI7_TF) indisponible", __FUNCTION__);
         }
-        else if (l_BarTime != m_LastRsi7BarTime)
+        else if (l_Rsi7BarTime != m_LastRsi7BarTime)
         {
-            m_LastRsi7BarTime = l_BarTime;
+            // ✅ FIX AUDIT 3 : CANDIDATURE seulement — l'horodatage est
+            // validé APRÈS une mise à jour d'état RÉUSSIE (voir plus bas).
+            // L'ancien code mémorisait ici : une bougie dont les données
+            // (Copy*/indicateur) échouaient était définitivement perdue.
+            //----------------------------------------------------------------------------------------
             l_NewRsi7 = true;
         }
 
@@ -285,8 +291,28 @@ public:
         // Fidélité Pine : l'indicateur calcule toujours ; seule
         // l'ENTRÉE est filtrée (un signal filtré = propriété de la
         // bougie, pas de rejeu).
+        //
+        // ✅ FIX AUDIT 3 : UpdateState retourne le succès. En cas
+        // d'échec (backfill, iTime, Copy* indisponible), la bougie
+        // n'est PAS validée → elle sera RETENTÉE au tick suivant de
+        // la MÊME bougie (jamais perdue, jamais traitée deux fois —
+        // les machines déjà à jour sautent, cf. m_LastProcBarL/S
+        // dans le scanner). Pas d'exécution ce tick : données
+        // incomplètes. EMA50 (SANS ÉTAT) garde son schéma d'origine :
+        // un échec de lecture n'y corrompt rien (pas de mémoire).
         //--------------------------------------------------------------
-        if (l_NewRsi7) m_Rsi7Scanner.UpdateState();
+        if (l_NewRsi7)
+        {
+            if (m_Rsi7Scanner.UpdateState())
+            {
+                m_LastRsi7BarTime = l_Rsi7BarTime;   // validé APRÈS succès
+            }
+            else
+            {
+                l_NewRsi7 = false;                   // retry au tick suivant (même bougie)
+                if (!l_NewEma50) return;             // rien d'autre à faire ce tick
+            }
+        }
 
         // === FILTRES D'EXÉCUTION (n'affectent pas l'état des scanners) ===
         //----------------------------------------------------------------
@@ -459,8 +485,9 @@ void CStrategy::TryEma50(const MqlTick &i_tick)
 //|   3. Si signal → ExecuteSignal                                     |
 //|                                                                  |
 //| Note : l'état pivots (prev*) vit dans UpdateState(), appelé à      |
-//| chaque nouvelle bougie AVANT les filtres — TryRsi7 ne fait que    |
-//| consommer le drapeau de divergence de la bougie. Un échec         |
+//| chaque nouvelle bougie AVANT les filtres (et retenté au tick      |
+//| suivant tant qu'il retourne FALSE — FIX AUDIT 3) — TryRsi7 ne fait |
+//| que consommer le drapeau de divergence de la bougie. Un échec     |
 //| d'ExecuteSignal ne se rollbacke pas : l'état pivots n'est PAS lié |
 //| à un ordre (il évoluerait pareil dans le Pine, alerte prise ou non) |
 //| — le trade est manqué, comme une alerte Pine non exécutée.        |
@@ -495,7 +522,9 @@ void CStrategy::TryRsi7(const MqlTick &i_tick)
 //|   2. Un membre + un scheduler m_LastXxxBarTime (init 0 au Config) |
 //|   3. Detection() : détection nouvelle bougie sur K_Xxx_TF ; si    |
 //|      le scanner est À ÉTAT → m_XxxScanner.UpdateState() AVANT les |
-//|      filtres ; puis if (new_xxx && K_Xxx_Trade) TryXxx(l_Tick);  |
+//|      filtres ET valider l'horodatage seulement après un retour     |
+//|      TRUE (échec = retry au tick suivant, jamais de bougie perdue) ;|
+//|      puis if (new_xxx && K_Xxx_Trade) TryXxx(l_Tick);  |
 //|   4. TryXxx : verrous → m_XxxScanner.GetSignal() →               |
 //|      ExecuteSignal()                                              |
 //|   5. m_XxxScanner.RollbackSignal() si le scanner a un état lié à  |

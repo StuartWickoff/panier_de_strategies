@@ -47,13 +47,25 @@
 //|   le scanner travaille sur SON TF, quel que soit le chart)      |
 //| - bar_index>=16 (pivots, l.39)      → garde Bars() >= 18        |
 //|   (bougie confirmée = Bars-2 bar_index)                         |
-//| - bar_index>=200 (entrée, l.94)     → garde Bars() >= 200       |
+//| - bar_index>=200 (entrée, l.94)     → garde Bars()-2 >= 200     |
+//|   (MÊME convention d'index que les pivots : la bougie signal     |
+//|   est le shift 1 = index Pine Bars()-2 → Bars() >= 202 ; FIX     |
+//|   AUDIT 1 : l'ancienne garde Bars() >= 200 laissait entrer 2     |
+//|   bougies trop tôt)                                             |
 //| - ta.lowest(low,10) (l.28)          → iLowest(shift 1, count    |
 //|   K_RSI7_SL_Bars) — bougie signal incluse                      |
-//| - close-stopCandidate>mintick       → risk = ask - SL > tick    |
-//|   size (convention ask, cf. EMA50)                              |
-//| - entrée = close bougie signal      → ask au 1er tick suivant   |
-//|   (convention projet, validée par les backtests EMA50)          |
+//| - close-stopCandidate>mintick (l.94)→ DEUX contrôles séparés     |
+//|   (FIX AUDIT 2) : filtre PINE sur la CLÔTURE de la bougie       |
+//|   signal (iClose(1) - SL > tick size), PUIS contrôle            |
+//|   d'EXÉCUTION sur le prix réel (ask - SL > tick size) — le      |
+//|   spread/le mouvement entre clôture et 1er tick ne peuvent     |
+//|   plus faire accepter une entrée que le Pine aurait rejetée     |
+//| - entrée = close bougie signal      → ask réel au 1er tick      |
+//|   suivant (ADAPTATION d'exécution MQL5 assumée et documentée :  |
+//|   sizing et TP fondés sur le prix RÉEL de remplissage, pas sur  |
+//|   le close — le TP peut différer du TP simulé Pine de           |
+//|   (ask - close) ; jamais l'inverse : le filtre d'admission,     |
+//|   lui, reste celui du Pine sur la clôture)                      |
 //| - tp = entry+3*(entry-sl) (l.97)    → K_RSI7_TP_R (défaut 3.0)  |
 //| - "not active" (l.94)               → verrou SOLO = position    |
 //|   réelle commentée "Rsi7Scanner" (HasPositionForSymbol)         |
@@ -99,7 +111,7 @@
 //////////////////////////////////////////////////////////
 // Gardes et constantes Pine (codées en dur = fidélité au .pine,
 // qui n'en fait pas des inputs).
-#define RSI7_WARMUP_BARS     200   // Entrée : bar_index >= 200 (Pine l.94)
+#define RSI7_WARMUP_BARS     200   // Entrée : bar_index >= 200 sur la bougie SIGNAL (Pine l.94) — le contrôle applique Bars()-2 >= 200
 #define RSI7_MIN_BARS_PIVOT   18   // Pivots : bar_index >= 16 (Pine l.39) — bougie confirmée = Bars-2
 #define RSI7_PIVOT_SHIFT       3   // Centre du pivot : low[3] (creux confirmé 3 bougies après)
 #define RSI7_GAP_MIN           5   // Écart min entre pivots, INCLUS (Pine l.50)
@@ -205,6 +217,22 @@ private:
     double          m_PrevRsiS;         // RSI du pivot haut précédent
     datetime        m_PrevBarTimeS;     // open-time de la bougie pivot haut précédente
     bool            m_DivergenceShort;  // divergence cachée BAISSIÈRE confirmée à la dernière clôture
+
+    // === ANTI-DOUBLON / REPRISE (FIX AUDIT 3) ===
+    // Dernière bougie CONFIRMÉE traitée par CHAQUE machine. Une même
+    // bougie ne modifie jamais deux fois l'état d'une même machine :
+    // après un échec de lecture (Copy*), UpdateState retourne FALSE,
+    // Strategy ne valide PAS la bougie et rappelle au tick suivant —
+    // les machines déjà à jour sautent (idempotence), celle en retard
+    // reprend, avec rattrapage chronologique des bougies manquées.
+    // 0 = jamais traitée (DÉMARRAGE, FIX AUDIT 4) : la 1re confirmation
+    // live met l'état pivots à jour mais SUPPRIME les drapeaux — aucune
+    // entrée rétroactive sur une bougie clôturée avant l'armement de
+    // l'EA (une alerte Pine ne se déclenche que sur les clôtures
+    // POSTÉRIEURES à l'ajout du script).
+    //------------------------------------------------------------------
+    datetime        m_LastProcBarL;      // dernière confirmée traitée — machine basse (long)
+    datetime        m_LastProcBarS;      // dernière confirmée traitée — machine haute (short)
 
     //+--------------------------------------------------------+
     //| DetectPivot (privé)                                     |
@@ -461,8 +489,9 @@ private:
     //|                                                        |
     //| Données indicateur ASYNC : au démarrage (surtout tester),|
     //| CopyBuffer peut échouer tant que le RSI n'est pas        |
-    //| calculé → retourne FALSE, sera retenté à la bougie       |
-    //| suivante jusqu'à succès (une fois).                      |
+    //| calculé → retourne FALSE, retenté au TICK suivant (FIX   |
+    //| AUDIT 3 : UpdateState ne valide la bougie qu'après succès|
+    //| — plus d'attente d'une bougie entière).                  |
     //|                                                        |
     //| Retour : TRUE = état initialisé (une fois pour toutes)   |
     //+--------------------------------------------------------+
@@ -497,10 +526,21 @@ private:
         // Replay chronologique des confirmations passées (shifts ≥ 2) :
         // DetectPivot met l'état à jour à CHAQUE pivot rencontré. Un pivot
         // est compté quand l'état a bougé (temps du pivot précédent changé).
+        // FIX PARITÉ (audit §4 — transition backfill→live) : borne PINE.
+        // Le Pine ne traite une confirmation qu'à partir de bar_index >= 16
+        // (l.39), soit un candidat >= 13. Sans ce clamp, un historique COURT
+        // (< 516 bougies) faisait évaluer au backfill des candidats 3..12
+        // que le Pine ne regarde JAMAIS → pivots fantômes dans prev*.
+        // Clamp : shift conf <= bars_avail - 17 ⇔ bougie confirmée >= 16.
+        // Historique long : la fenêtre 500 reste la limite (aucun changement).
         //----------------------------------------------------------------------
+        int s_start = n - (2 * RSI7_PIVOT_SHIFT + 1);
+        int s_pine_min = bars_avail - 17;            // conf shift max pour conf bar_index = 16
+        if (s_start > s_pine_min) s_start = s_pine_min;
+
         int pivots_found = 0;
         int pivots_high_found = 0;
-        for (int s = n - (2 * RSI7_PIVOT_SHIFT + 1); s >= 2; s--)
+        for (int s = s_start; s >= 2; s--)
         {
             datetime prev_time_before = m_PrevBarTime;
             DetectPivot(lows, times, rsis, s, false);
@@ -574,6 +614,13 @@ public:
         m_PrevBarTimeS   = 0;
         m_DivergenceShort = false;
 
+        // Anti-double / reprise (FIX AUDIT 3-4) : aucune bougie confirmée
+        // traitée pour l'instant — 0 marque le démarrage (la 1re
+        // confirmation live armera les signaux, sans entrée rétroactive).
+        //----------------------------------------------------------------
+        m_LastProcBarL   = 0;
+        m_LastProcBarS   = 0;
+
         m_HandleRSI = iRSI(Symbol(), m_TF, (int)K_RSI7_Period, PRICE_CLOSE);
         if (m_HandleRSI == INVALID_HANDLE)
         {
@@ -618,6 +665,27 @@ public:
     //| filtrée. Sinon l'état prev* serait troué et les gaps    |
     //| calculés sur des pivots non adjacents.                  |
     //|                                                        |
+    //| ✅ FIX AUDIT 3 (contrat d'exécution) : retourne FALSE si |
+    //| la bougie n'a PAS pu être traitée (backfill, iTime,     |
+    //| Copy* indisponible). Strategy ne valide l'horodatage    |
+    //| qu'après TRUE → RETRY au TICK suivant, sans attendre la |
+    //| bougie suivante. Aucune confirmation n'est perdue :     |
+    //|   - idempotence par machine (m_LastProcBarL/S) : une    |
+    //|     bougie déjà traitée n'est JAMAIS retraitée ;        |
+    //|   - rattrapage chronologique : les bougies manquées     |
+    //|     (données indisponibles plusieurs barres) sont       |
+    //|     rejouées au retour des données, en ordre.           |
+    //|                                                        |
+    //| ✅ FIX AUDIT 4 (démarrage) : la PREMIÈRE confirmation    |
+    //| live de chaque machine (m_LastProcBar* == 0) met l'état |
+    //| pivots à jour mais SUPPRIME les drapeaux de divergence  |
+    //| — aucune entrée rétroactive sur une bougie clôturée     |
+    //| avant l'armement de l'EA (une alerte Pine ne se         |
+    //| déclenche que sur les clôtures POSTÉRIEURES à l'ajout   |
+    //| du script). Le backfill couvre l'historique (shifts     |
+    //| >= 2) ; le shift 1 au démarrage fait partie de la       |
+    //| séquence D'ÉTAT, pas des signaux.                      |
+    //|                                                        |
     //| 1er appel : replay historique (TryBackfill) pour un     |
     //| état chaud, comme un indicateur Pine chargé sur tout    |
     //| l'historique du chart.                                  |
@@ -626,34 +694,72 @@ public:
     //| de clôturer — équivalent barstate.isconfirmed du Pine). |
     //| Candidat pivot = shift 4, voisines = shifts 1..7 sauf 4.|
     //+--------------------------------------------------------+
-    void UpdateState(void)
+    bool UpdateState(void)
     {
-        // La divergence est une propriété de LA bougie qui vient de
-        // clôturer : recalculée à chaque appel, consommée par GetSignal.
-        // Les deux machines (basse/long, haute/short) posent leur propre
-        // drapeau — indépendants l'un de l'autre.
+        // (0) Bougie confirmée = shift 1. Illisible → échec explicite :
+        //     Strategy ne validera pas la bougie, retry au tick suivant.
         //----------------------------------------------------------------
-        m_Divergence      = false;
-        m_DivergenceShort = false;
+        datetime conf_time = iTime(Symbol(), m_TF, 1);
+        if (conf_time == 0) return(false);
 
-        // Backfill paresseux (une fois) : données async → retry à la bougie suivante
-        //-----------------------------------------------------------------------------
+        bool short_on   = K_RSI7_Short;
+        bool long_done  = (m_LastProcBarL == conf_time);              // machine basse à jour ?
+        bool short_done = (!short_on || m_LastProcBarS == conf_time); // machine haute à jour ?
+        if (long_done && short_done) return(true);   // déjà traitée → idempotence
+
+        // (1) Backfill paresseux (une fois) — échec → FALSE : retry au
+        //     TICK suivant (pas à la bougie suivante — FIX AUDIT 3).
+        //----------------------------------------------------------------
         if (!m_BackfillDone)
         {
-            if (!TryBackfill()) return;   // historique/RSI indisponible → état vide, on réessaiera
+            if (!TryBackfill()) return(false);   // historique/RSI indisponible → on réessaiera
         }
 
-        // Historique minimal pour la fenêtre pivot (Pine : bar_index >= 16)
+        // (2) Historique minimal pour la fenêtre pivot (Pine : bar_index >= 16)
         //--------------------------------------------------------------------
-        if (Bars(Symbol(), m_TF) < RSI7_MIN_BARS_PIVOT) return;
+        if (Bars(Symbol(), m_TF) < RSI7_MIN_BARS_PIVOT) return(false);
 
-        // Lecture de la fenêtre : shifts 0..7 (bougie formante 0 ignorée,
-        // confirmée = 1, candidat pivot = 4, voisines jusqu'à 7)
-        //------------------------------------------------------------------
-        int window = 2 * RSI7_PIVOT_SHIFT + 2;   // = 8
+        // (3) Confirmations à traiter, PAR MACHINE : de (dernière traitée
+        //     + 1) jusqu'au shift 1, en ordre chronologique. Steady state :
+        //     dernière traitée au shift 2 → s = 1 (chemin normal, fenêtre
+        //     8 identique à l'ancien code). Écart > 2 = bougies manquées
+        //     → rattrapage. 0 = démarrage (backfill déjà passé) → seule
+        //     la confirmée courante. Une machine à jour passe son tour.
+        //---------------------------------------------------------------------
+        int sL = 1;
+        if (m_LastProcBarL > 0)
+        {
+            int p = iBarShift(Symbol(), m_TF, m_LastProcBarL, true);
+            if (p > 1)  sL = p - 1;                    // bougies manquées côté long
+            if (p < 0)  LOG.WARNING(m_Name + " : dernière bougie long traitée hors historique — trou d'état possible", __FUNCTION__);
+        }
+        int sS = 1;
+        if (m_LastProcBarS > 0)
+        {
+            int p = iBarShift(Symbol(), m_TF, m_LastProcBarS, true);
+            if (p > 1)  sS = p - 1;                    // bougies manquées côté short
+            if (p < 0)  LOG.WARNING(m_Name + " : dernière bougie short traitée hors historique — trou d'état possible", __FUNCTION__);
+        }
+        if (long_done)  sL = 0;    // déjà à jour → rien à traiter
+        if (short_done) sS = 0;
+
+        int first_conf = (sL > sS ? sL : sS);
+        if (first_conf < 1) return(true);             // les deux machines à jour
+
+        // Démarrage : 1re confirmation live de chaque machine →
+        // état OUI, drapeaux NON (FIX AUDIT 4 : pas d'entrée rétroactive).
+        //--------------------------------------------------------------------
+        bool first_live_L = (m_LastProcBarL == 0);
+        bool first_live_S = (m_LastProcBarS == 0);
+
+        // (4) Fenêtre : plus ancienne confirmation + ses 6 voisines
+        //     (DetectPivot accède aux shifts conf .. conf+6).
+        //     Steady state : 1 + 7 = 8 — comme l'ancien code.
+        //--------------------------------------------------------------
+        int window = first_conf + 2 * RSI7_PIVOT_SHIFT + 1;
 
         double   lows[];
-        double   highs[];   // machine haute (short) — copiée si K_RSI7_Short
+        double   highs[];   // machine haute (short) — copiée si elle a du travail
         datetime times[];
         double   rsis[];
         ArraySetAsSeries(lows,  true);
@@ -661,34 +767,51 @@ public:
         ArraySetAsSeries(times, true);
         ArraySetAsSeries(rsis,  true);
 
-        if (CopyLow(Symbol(), m_TF, 0, window, lows) < window)    return;
-        if (CopyTime(Symbol(), m_TF, 0, window, times) < window)  return;
-        if (CopyBuffer(m_HandleRSI, 0, 0, window, rsis) < window) return;
+        if (CopyLow(Symbol(), m_TF, 0, window, lows) < window)    return(false);
+        if (CopyTime(Symbol(), m_TF, 0, window, times) < window)  return(false);
+        if (CopyBuffer(m_HandleRSI, 0, 0, window, rsis) < window) return(false);
 
-        // Confirmation de la bougie shift 1 → candidat pivot shift 4
-        //--------------------------------------------------------------
-        DetectPivot(lows, times, rsis, 1, true);
+        // (5) Machine basse (LONG) — TOUJOURS en premier (invariant de
+        //     non-régression : la machine haute ne peut jamais la
+        //     perturber). Chaque confirmation : reset du drapeau puis
+        //     détection ; rattrapage (s > 1) et 1re live (démarrage)
+        //     ne laissent PAS de drapeau (signaux périmés/antérieurs
+        //     à l'armement = non consommables, comme au backfill).
+        //--------------------------------------------------------------------
+        if (sL >= 1)
+        {
+            for (int s = sL; s >= 1; s--)
+            {
+                m_Divergence = false;
+                DetectPivot(lows, times, rsis, s, (s == 1));
+                if (s > 1 || first_live_L) m_Divergence = false;
+            }
+            m_LastProcBarL = conf_time;
+        }
 
-        // Machine haute (short) : même confirmation, miroir sur les highs.
-        // TOUJOURS APRÈS le long (invariant de non-régression : la machine
-        // basse ne peut jamais être perturbée par la machine haute — si
-        // les highs manquent, le short saute CETTE confirmation, le long
-        // a déjà été traité). Symétrie de traitement : indisponibilité
-        // = bougie non traitée pour la machine concernée (même mode de
-        // défaillance que le long quand CopyLow échoue ; en pratique
-        // CopyLow/CopyHigh lisent la même historique et échouent ensemble).
-        //---------------------------------------------------------------------
-        if (K_RSI7_Short)
+        // (6) Machine haute (SHORT) — même confirmation, miroir sur les
+        //     highs, APRÈS le long. Highs indisponibles → échec explicite :
+        //     la bougie n'est pas validée, retry au tick suivant ; la
+        //     machine basse est déjà commise et ne retraitera PAS cette
+        //     bougie au retry (idempotence m_LastProcBarL).
+        //-----------------------------------------------------------------------
+        if (sS >= 1)
         {
             if (CopyHigh(Symbol(), m_TF, 0, window, highs) < window)
             {
-                LOG.WARNING(m_Name + " : CopyHigh indisponible — machine courte sautée cette bougie", __FUNCTION__);
+                LOG.WARNING(m_Name + " : CopyHigh indisponible — machine courte en attente, retry au tick suivant", __FUNCTION__);
+                return(false);
             }
-            else
+            for (int s = sS; s >= 1; s--)
             {
-                DetectPivotShort(highs, times, rsis, 1, true);
+                m_DivergenceShort = false;
+                DetectPivotShort(highs, times, rsis, s, (s == 1));
+                if (s > 1 || first_live_S) m_DivergenceShort = false;
             }
+            m_LastProcBarS = conf_time;
         }
+
+        return(true);
     }
 
     //+--------------------------------------------------------+
@@ -725,11 +848,21 @@ public:
     //|                          sur SON TF, ici même)          |
     //|   - not active         → verrou SOLO (TryRsi7, AVANT    |
     //|                          GetSignal)                     |
-    //|   - bar_index >= 200   → garde Bars() >= 200 ci-dessous |
+    //|   - bar_index >= 200   → garde Bars()-2 >= 200 ci-dessous|
+    //|                          (bougie signal = shift 1 = index|
+    //|                          Pine Bars()-2 — FIX AUDIT 1)   |
     //|   - divergence         → drapeau posé par UpdateState à |
     //|                          la clôture de CETTE bougie     |
-    //|   - close-stop>mintick → risk = ask - SL > tick size    |
-    //|                          (short : sl - bid > tick size) |
+    //|   - close-stop>mintick → FILTRE PINE sur la clôture de  |
+    //|                          la bougie signal : iClose(1) - |
+    //|                          SL > tick size, PUIS contrôle   |
+    //|                          d'EXÉCUTION distinct au prix    |
+    //|                          réel (ask/bid) — FIX AUDIT 2.  |
+    //|                          Le sizing et le TP restent fondés|
+    //|                          sur le prix RÉEL de remplissage |
+    //|                          (adaptation MQL5 documentée : le|
+    //|                          TP peut différer du TP Pine de |
+    //|                          (ask - close))                 |
     //|                                                        |
     //| SL : plus bas des K_RSI7_SL_Bars bougies, bougie signal |
     //| incluse (Pine : ta.lowest(low,10) — shift 1..10).       |
@@ -752,10 +885,15 @@ public:
     //+--------------------------------------------------------+
     bool GetSignal(const MqlTick &i_tick, STRUCT_STRATEGY &o_datas)
     {
-        // Historique minimal (Pine : bar_index >= 200 — garde d'ENTRÉE,
-        // distincte de la garde pivots bar_index >= 16)
-        //----------------------------------------------------------------
-        if (Bars(Symbol(), m_TF) < RSI7_WARMUP_BARS) return(false);
+        // Garde warmup (Pine l.94 : bar_index >= 200 sur la bougie SIGNAL)
+        // La bougie signal est le shift 1 : son index Pine = Bars()-2
+        // (shift 0 = bougie formante = index Bars()-1). Pine exige
+        // l'index de la bougie SIGNAL >= 200 → Bars()-2 >= 200 →
+        // Bars() >= 202. FIX AUDIT 1 : l'ancienne garde Bars() >= 200
+        // autorisait l'entrée 2 bougies trop tôt ; même convention
+        // d'index que la garde pivots (Bars() >= 18 pour bar_index>=16).
+        //--------------------------------------------------------------------
+        if (Bars(Symbol(), m_TF) - 2 < RSI7_WARMUP_BARS) return(false);
 
         // Divergence cachée confirmée à la clôture de la bougie signal ?
         // LONG = haussière (machine basse, Pine) ; SHORT = baissière
@@ -784,16 +922,24 @@ public:
         if (lowest_idx < 0) return(false);
         double sl = iLow(Symbol(), m_TF, lowest_idx);
 
-        // === ENTRÉE = ASK RÉEL D'EXÉCUTION ===
-        // (équivalent live du "close" du Pine : l'ordre part au 1er
-        //  tick de la bougie suivante — convention projet, cf. EMA50)
-        //----------------------------------------------------------
-        double entry = i_tick.ask;
+        // === FILTRE PINE : CLÔTURE de la bougie signal (l.94) ===
+        // close - stopCandidate > syminfo.mintick — évalué sur la
+        // CLÔTURE du shift 1, PAS sur le prix d'exécution. FIX AUDIT 2 :
+        // le spread et le mouvement entre la clôture et le 1er tick ne
+        // peuvent plus faire accepter une entrée que le Pine rejette.
+        //--------------------------------------------------------------
+        double close_sig = iClose(Symbol(), m_TF, 1);
+        if (close_sig <= 0.0) return(false);              // lecture impossible → pas d'entrée ce tick
+        if (close_sig - sl <= min_tick) return(false);    // le Pine aurait rejeté cette entrée
 
-        // === FILTRE ANTI-RISQUE-NUL ===
-        // (Pine : close - stopCandidate > syminfo.mintick)
-        //----------------------------------------------------
-        double risk = entry - sl;
+        // === ENTRÉE + CONTRÔLE D'EXÉCUTION (distinct du filtre Pine) ===
+        // Adaptation MQL5 : l'ordre part à l'ask réel au 1er tick de la
+        // bougie suivante — il faut un risque strictement positif (> tick)
+        // au prix DISPONIBLE. Le sizing et le TP sont fondés sur CE prix
+        // réel (le TP peut différer du TP simulé Pine de (ask - close)).
+        //-------------------------------------------------------------------
+        double entry = i_tick.ask;
+        double risk  = entry - sl;
         if (risk <= min_tick) return(false);
 
         // === SIGNAL D'ACHAT → REMPLIR STRUCT_STRATEGY ===
@@ -828,13 +974,20 @@ public:
         if (highest_idx < 0) return(false);
         double sl = iHigh(Symbol(), m_TF, highest_idx);
 
-        // Entrée = bid réel (miroir de l'ask long)
-        //--------------------------------------------
-        double entry = i_tick.bid;
+        // === FILTRE PINE MIROIR : SL - CLÔTURE(bougie signal) > mintick ===
+        // (le Pine d'origine n'a pas de short : miroir exact du filtre
+        //  close - SL du long, évalué sur la CLÔTURE — FIX AUDIT 2)
+        //---------------------------------------------------------------------
+        double close_sig = iClose(Symbol(), m_TF, 1);
+        if (close_sig <= 0.0) return(false);              // lecture impossible → pas d'entrée ce tick
+        if (sl - close_sig <= min_tick) return(false);    // le miroir du Pine aurait rejeté
 
-        // Filtre anti-risque-nul, sens short : sl - entry > mintick
-        //-------------------------------------------------------------
-        double risk = sl - entry;
+        // === ENTRÉE + CONTRÔLE D'EXÉCUTION (distinct du filtre) ===
+        // bid réel, risque strictement positif au prix DISPONIBLE ;
+        // sizing et TP fondés sur le prix réel (adaptation documentée).
+        //----------------------------------------------------------------
+        double entry = i_tick.bid;
+        double risk  = sl - entry;
         if (risk <= min_tick) return(false);
 
         // === SIGNAL DE VENTE → REMPLIR STRUCT_STRATEGY ===
