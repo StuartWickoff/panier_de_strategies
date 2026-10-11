@@ -7,9 +7,13 @@
 //|                                                                  |
 //|   - Détient les ressources partagées (CDatas DATAS)              |
 //|   - Détient un ou plusieurs membres scanner EXPLICITES          |
-//|     (ici : CScannerEma50 m_Ema50Scanner)                       |
-//|   - Detection() appelle chaque scanner SÉLECTIONNÉ via TryXxx()  |
-//|     (panier : K_EMA50_Trade, false par défaut — greffé ≠ tradé)  |
+//|     (ici : CScannerEma50 m_Ema50Scanner,                        |
+//|            CScannerRsi7  m_Rsi7Scanner)                        |
+//|   - Detection() : un SCHEDULER indépendant par scanner (son TF), |
+//|     l'état des scanners À ÉTAT évolue AVANT les filtres, puis   |
+//|     chaque scanner SÉLECTIONNÉ est appelé via TryXxx()          |
+//|     (panier : K_EMA50_Trade / K_RSI7_Trade, false par défaut —  |
+//|      greffé ≠ tradé)                                             |
 //|   - ManagePositions() délègue à scanner.OnTick()                 |
 //|   - SetTicket/GetPositionNb/DeleteDetection/CloseOfPositions    |
 //|     → délèguent à DATAS partagé                                  |
@@ -18,10 +22,15 @@
 //| scanners. Strategy ne sait PAS ce que fait un scanner, il       |
 //| appelle juste Detect() et relaie au broker.                      |
 //|                                                                  |
+//| Chaque scanner a SON verrou SOLO (filtré par SON nom dans le    |
+//| comment d'ordre) : 1 position par scanner, pas pour l'EA entier.|
+//|                                                                  |
 //| Ajouter un scanner = créer Scanner_xxx.mqh (avec son toggle
-//| K_Xxx_Trade=false) + ajouter un membre + une méthode TryXxx()
-//| + l'appeler dans Detection() sous if (K_Xxx_Trade).
-//| On ne touche PAS aux autres scanners.                            |
+//| K_Xxx_Trade=false) + ajouter un membre + un scheduler + une
+//| méthode TryXxx() + l'appeler dans Detection() sous if (K_Xxx_Trade).
+//| Si le scanner est À ÉTAT : appeler son UpdateState() AVANT les
+//| filtres d'exécution (pattern RSI7). On ne touche PAS aux autres
+//| scanners.
 //|                                                                  |
 //+------------------------------------------------------------------+
 
@@ -55,6 +64,7 @@
 // Le scanner apporte SES inputs dans SON fichier (auto-contenu),
 // dont son toggle de sélection K_Xxx_Trade (panier).
 #include <Koenigin/Scanner_ema50.mqh>
+#include <Koenigin/Scanner_rsi7.mqh>
 // Pour en brancher un autre :
 // #include <Koenigin/Scanner_xxx.mqh>
 
@@ -79,6 +89,7 @@ private:
     // quand on branche un nouveau scanner.
     //-----------------------------------------------------------------
     CScannerEma50 m_Ema50Scanner;
+    CScannerRsi7  m_Rsi7Scanner;
 
     // État interne
     //------------
@@ -86,16 +97,19 @@ private:
 
     // ✅ FIX ChatGPT #2 : scheduler indépendant du chart timeframe
     // Strategy garde en mémoire le timestamp de la dernière bougie
-    // traitée sur K_EMA50_TF (pas PERIOD_CURRENT). Comme ça, le
-    // scanner H1 est appelé à chaque nouvelle bougie H1 même si
-    // le chart est M15 ou H4.
+    // traitée sur le TF DE CHAQUE SCANNER (pas PERIOD_CURRENT). Comme
+    // ça, un scanner H1 est appelé à chaque nouvelle bougie H1 même si
+    // le chart est M15 ou H4. Un scheduler par scanner : leurs TF
+    // peuvent différer.
     //----------------------------------------------------------------
     datetime        m_LastEma50BarTime;
+    datetime        m_LastRsi7BarTime;
 
     // Helpers d'exécution (communs à tous les scanners)
     //---------------------------------------------------
     bool ExecuteSignal(const string i_scanner_name, STRUCT_STRATEGY &io_datas);  // retourne TRUE si ordre envoyé avec succès
     void TryEma50(const MqlTick &i_tick);
+    void TryRsi7(const MqlTick &i_tick);
 
 //==================================
 //--- PUBLIC
@@ -112,9 +126,10 @@ public:
     {
         m_InitOk = false;
 
-        // ✅ FIX ChatGPT #2 : init du scheduler indépendant du chart TF
+        // ✅ FIX ChatGPT #2 : init des schedulers indépendants du chart TF
         //---------------------------------------------------------------
         m_LastEma50BarTime = 0;
+        m_LastRsi7BarTime  = 0;
 
         // 1. Configure les données partagées
         //-------------------------------------
@@ -124,10 +139,15 @@ public:
         //-----------------------------------------
         // Le nom passé au scanner sera le prefix du comment de l'ordre
         // posé par Broker → permet le filtrage par scanner dans
-        // IsPositionOpenedToday.
+        // HasPositionForSymbol (verrou SOLO par scanner).
         if (!m_Ema50Scanner.Config("Ema50Scanner", K_EMA50_TF))
         {
             LOG.ERROR(DATAS.GetStrategyName() + "Initialisation scanner EMA50 échouée", __FUNCTION__);
+            return(false);
+        }
+        if (!m_Rsi7Scanner.Config("Rsi7Scanner", K_RSI7_TF))
+        {
+            LOG.ERROR(DATAS.GetStrategyName() + "Initialisation scanner RSI7 échouée", __FUNCTION__);
             return(false);
         }
 
@@ -138,6 +158,11 @@ public:
             LOG.INFO(DATAS.GetStrategyName() + "Panier : EMA50 SOLO sélectionné (K_EMA50_Trade=true) — trade ACTIF", __FUNCTION__);
         else
             LOG.INFO(DATAS.GetStrategyName() + "Panier : EMA50 SOLO non sélectionné (K_EMA50_Trade=false) — DORMANT, aucun trade", __FUNCTION__);
+
+        if (K_RSI7_Trade)
+            LOG.INFO(DATAS.GetStrategyName() + "Panier : RSI7 SOLO sélectionné (K_RSI7_Trade=true) — trade ACTIF", __FUNCTION__);
+        else
+            LOG.INFO(DATAS.GetStrategyName() + "Panier : RSI7 SOLO non sélectionné (K_RSI7_Trade=false) — DORMANT, aucun trade", __FUNCTION__);
 
         m_InitOk = true;
         LOG.INFO(DATAS.GetStrategyName() + "Stratégie (liaison) initialisée avec succès", __FUNCTION__);
@@ -154,6 +179,7 @@ public:
         // Libère chaque scanner
         //----------------------
         m_Ema50Scanner.End();
+        m_Rsi7Scanner.End();
 
         // Flush les données
         //-------------------
@@ -182,21 +208,28 @@ public:
     //| Detection                                               |
     //| Appelée par Koenigin::OnTick() à CHAQUE TICK.           |
     //|                                                          |
-    //| ✅ FIX ChatGPT #2 : anti-rejeu sur K_EMA50_TF (pas       |
-    //|    PERIOD_CURRENT) → marche quel que soit le TF du chart |
+    //| ✅ FIX ChatGPT #2 : anti-rejeu sur le TF DE CHAQUE       |
+    //|    SCANNER (pas PERIOD_CURRENT) → marche quel que soit   |
+    //|    le TF du chart. Un scheduler par scanner.             |
     //|                                                          |
     //| ✅ FIX ChatGPT #1 : l'état évolue avant les filtres.     |
-    //|    EMA50 n'a PAS d'état à maintenir (le crossUp se       |
-    //|    calcule sur les bougies à la demande, et la position  |
-    //|    réelle + SL/TP broker remplacent l'état persistant    |
-    //|    du Pine) → pas d'UpdateState.                         |
+    //|    - EMA50 : SANS ÉTAT (le crossUp se calcule sur les     |
+    //|      bougies à la demande) → pas d'UpdateState.          |
+    //|    - RSI7 : À ÉTAT (machine à pivots prev*, le Pine met  |
+    //|      ses var à jour à CHAQUE clôture) → UpdateState()    |
+    //|      appelé à CHAQUE nouvelle bougie K_RSI7_TF, AVANT    |
+    //|      les filtres, le verrou SOLO et le toggle panier.    |
+    //|      Sinon l'état serait troué (pivots manqués pendant   |
+    //|      une position ouverte / une zone NEWS) et les gaps   |
+    //|      calculés sur des pivots non adjacents.              |
     //|                                                          |
     //| Flux :                                                   |
     //|   1. Lecture du tick                                     |
-    //|   2. Anti-rejeu sur K_EMA50_TF (nouvelle bougie ?)       |
-    //|   3. Filtres d'EXÉCUTION (NEWS, heures, jours)          |
-    //|   4. Panier : TryEma50() si sélectionné — verrou SOLO +  |
-    //|      GetSignal                                           |
+    //|   2. Anti-rejeu PAR SCANNER (nouvelle bougie sur SON TF ?) |
+    //|   3. État des scanners À ÉTAT (RSI7) — AVANT les filtres |
+    //|   4. Filtres d'EXÉCUTION (NEWS, heures, jours)          |
+    //|   5. Panier : TryXxx() des scanners sélectionnés dont    |
+    //|      la bougie est nouvelle — verrou SOLO + GetSignal    |
     //+--------------------------------------------------------+
     void Detection(void)
     {
@@ -209,30 +242,58 @@ public:
             return;
         }
 
-        // ✅ FIX ChatGPT #2 : anti-rejeu basé sur K_EMA50_TF (pas PERIOD_CURRENT)
+        // ✅ FIX ChatGPT #2 : anti-rejeu basé sur le TF DE CHAQUE SCANNER
         //-----------------------------------------------------------------------
         // Permet à l'EA de tourner sur un chart M15 ou H4 sans rater de
         // clôture H1. Strategy est appelée à chaque tick par Koenigin,
-        // mais ne fait le travail qu'une fois par nouvelle bougie K_EMA50_TF.
+        // mais ne fait le travail d'un scanner qu'une fois par nouvelle
+        // bougie sur SON TF. Les schedulers sont indépendants : les TF
+        // des scanners peuvent différer.
         //-----------------------------------------------------------------------
-        datetime current_ema50_bar = iTime(Symbol(), K_EMA50_TF, 0);
-        if (current_ema50_bar == 0)
+        bool l_NewEma50 = false;
+        bool l_NewRsi7  = false;
+
+        datetime l_BarTime = iTime(Symbol(), K_EMA50_TF, 0);
+        if (l_BarTime == 0)
         {
             LOG.WARNING(DATAS.GetStrategyName() + "iTime(K_EMA50_TF) indisponible", __FUNCTION__);
-            return;
         }
-        if (current_ema50_bar == m_LastEma50BarTime)
+        else if (l_BarTime != m_LastEma50BarTime)
         {
-            return;  // pas de nouvelle bougie sur K_EMA50_TF → on attend
+            m_LastEma50BarTime = l_BarTime;
+            l_NewEma50 = true;
         }
-        m_LastEma50BarTime = current_ema50_bar;
 
-        // === FILTRES D'EXÉCUTION (n'affectent pas l'état du scanner) ===
+        l_BarTime = iTime(Symbol(), K_RSI7_TF, 0);
+        if (l_BarTime == 0)
+        {
+            LOG.WARNING(DATAS.GetStrategyName() + "iTime(K_RSI7_TF) indisponible", __FUNCTION__);
+        }
+        else if (l_BarTime != m_LastRsi7BarTime)
+        {
+            m_LastRsi7BarTime = l_BarTime;
+            l_NewRsi7 = true;
+        }
+
+        if (!l_NewEma50 && !l_NewRsi7) return;  // aucune nouvelle bougie → on attend
+
+        // ✅ FIX ChatGPT #1 : l'état AVANT les filtres.
+        // RSI7 = scanner À ÉTAT : la machine à pivots tourne à CHAQUE
+        // nouvelle bougie K_RSI7_TF — même si le scanner n'est pas
+        // sélectionné (K_RSI7_Trade=false), même si une position est
+        // ouverte, même si les filtres d'exécution vont bloquer.
+        // Fidélité Pine : l'indicateur calcule toujours ; seule
+        // l'ENTRÉE est filtrée (un signal filtré = propriété de la
+        // bougie, pas de rejeu).
+        //--------------------------------------------------------------
+        if (l_NewRsi7) m_Rsi7Scanner.UpdateState();
+
+        // === FILTRES D'EXÉCUTION (n'affectent pas l'état des scanners) ===
         //----------------------------------------------------------------
 
         // Zone NEWS : pas de nouveaux trades pendant la zone de sécurité.
-        // EMA50 entre uniquement au marché (jamais d'ordre pending à
-        // annuler) → simple passage de tour.
+        // Les scanners entrent uniquement au marché (jamais d'ordre
+        // pending à annuler) → simple passage de tour.
         //----------------------------------------------------------------
         if (!PARAM.OutsideSecurityZone())
         {
@@ -248,24 +309,25 @@ public:
 
         // === EXÉCUTION DES SCANNERS (PANIER) ===
         //---------------------------------------
-        // Greffé ≠ tradé : le scanner est câblé en permanence, mais ne
-        // trade QUE s'il est sélectionné (K_EMA50_Trade). Dé-sélectionner
+        // Greffé ≠ tradé : un scanner est câblé en permanence, mais ne
+        // trade QUE s'il est sélectionné (K_Xxx_Trade). Dé-sélectionner
         // en cours de route stoppe les NOUVELLES entrées ; les positions
         // déjà ouvertes courent jusqu'à leur SL/TP broker (intouchables).
         // Un signal émis pendant une période non sélectionnée est une
         // propriété de la bougie : il ne se rejoue pas (Pine-fidèle).
         //---------------------------------------------------------------
-        if (K_EMA50_Trade) TryEma50(l_Tick);
+        if (l_NewEma50 && K_EMA50_Trade) TryEma50(l_Tick);
+        if (l_NewRsi7  && K_RSI7_Trade)  TryRsi7(l_Tick);
     }
 
     //+--------------------------------------------------------+
     //| ManagePositions                                         |
     //| Appelée par Koenigin::OnTick() à chaque tick + OnTimer().  |
     //|                                                          |
-    //| EMA50 : rien à gérer intra-bar — le bracket SL/TP est    |
-    //| posé avec l'ordre et porté par le broker (fidélité       |
-    //| Pine : pas de BE, pas de trailing). Le Pine sortait      |
-    //| uniquement au SL/TP simulés ; ici c'est le broker qui    |
+    //| EMA50, RSI7 : rien à gérer intra-bar — le bracket SL/TP  |
+    //| est posé avec l'ordre et porté par le broker (fidélité   |
+    //| Pine : pas de BE, pas de trailing). Les Pine sortaient    |
+    //| uniquement aux SL/TP simulés ; ici c'est le broker qui    |
     //| s'en charge.                                             |
     //|                                                          |
     //| Recette pour un scanner AVEC management (BE, trailing,  |
@@ -274,7 +336,7 @@ public:
     //+--------------------------------------------------------+
     void ManagePositions(void)
     {
-        // EMA50 : aucun management — voir commentaire ci-dessus.
+        // EMA50, RSI7 : aucun management — voir commentaire ci-dessus.
     }
 };
 
@@ -387,11 +449,54 @@ void CStrategy::TryEma50(const MqlTick &i_tick)
 }
 
 //+------------------------------------------------------------------+
+//| TryRsi7                                                            |
+//| Orchestration du scanner RSI7 :                                   |
+//|   1. Verrou SOLO (position ouverte → pas de nouvelle entrée,      |
+//|      Pine : "not active" — filtré par LE nom de CE scanner)      |
+//|   2. GetSignal() — divergence cachée haussière confirmée à la     |
+//|      clôture ; SL = plus bas N bougies ; TP = 3R ; LONG uniquement |
+//|   3. Si signal → ExecuteSignal                                     |
+//|                                                                  |
+//| Note : l'état pivots (prev*) vit dans UpdateState(), appelé à      |
+//| chaque nouvelle bougie AVANT les filtres — TryRsi7 ne fait que    |
+//| consommer le drapeau de divergence de la bougie. Un échec         |
+//| d'ExecuteSignal ne se rollbacke pas : l'état pivots n'est PAS lié |
+//| à un ordre (il évoluerait pareil dans le Pine, alerte prise ou non) |
+//| — le trade est manqué, comme une alerte Pine non exécutée.        |
+//+------------------------------------------------------------------+
+void CStrategy::TryRsi7(const MqlTick &i_tick)
+{
+    // VERROU SOLO (1 trade simultané max — Pine-fidèle)
+    //----------------------------------------------------
+    if (m_Rsi7Scanner.HasPositionForSymbol())
+    {
+        return;
+    }
+
+    // RÉCUPÉRATION DU SIGNAL (divergence cachée confirmée à la bougie
+    // qui vient de clôturer — drapeau posé par UpdateState)
+    //------------------------------------------------------------------
+    STRUCT_STRATEGY l_Datas;
+    ZeroMemory(l_Datas);
+    if (!m_Rsi7Scanner.GetSignal(i_tick, l_Datas))
+    {
+        return;  // pas de signal
+    }
+
+    // EXÉCUTION (DATAS + MONEY + BROKER)
+    //---------------------------------------
+    ExecuteSignal(m_Rsi7Scanner.GetNamePublic(), l_Datas);
+}
+
+//+------------------------------------------------------------------+
 //| Ajouter un scanner = définir son TryXxx() ici :                   |
 //|   1. Scanner_xxx.mqh : input bool K_Xxx_Trade = false (panier)   |
-//|   2. Detection() : if (K_Xxx_Trade) TryXxx(l_Tick);              |
-//|   3. TryXxx : verrous → m_XxxScanner.GetSignal() →               |
+//|   2. Un membre + un scheduler m_LastXxxBarTime (init 0 au Config) |
+//|   3. Detection() : détection nouvelle bougie sur K_Xxx_TF ; si    |
+//|      le scanner est À ÉTAT → m_XxxScanner.UpdateState() AVANT les |
+//|      filtres ; puis if (new_xxx && K_Xxx_Trade) TryXxx(l_Tick);  |
+//|   4. TryXxx : verrous → m_XxxScanner.GetSignal() →               |
 //|      ExecuteSignal()                                              |
-//|   4. m_XxxScanner.RollbackSignal() si le scanner a un état à      |
-//|      restaurer en cas d'échec d'ordre.                            |
+//|   5. m_XxxScanner.RollbackSignal() si le scanner a un état lié à  |
+//|      l'ordre à restaurer en cas d'échec.                          |
 //+------------------------------------------------------------------+
