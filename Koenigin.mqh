@@ -66,8 +66,11 @@ enum ENUM_BALANCE_MODE
 //              I N P U T S                             //
 //                                                      //
 //////////////////////////////////////////////////////////
-// ✅ FIX ChatGPT : tous les input SONT déclarés AVANT tout #include
-// qui les utilise.
+// ✅ FIX ChatGPT : les input GLOBAUX sont déclarés AVANT tout #include
+// qui les utilise. Convention "panier de stratégies" : chaque scanner
+// déclare SES inputs dans SON propre fichier (auto-contenu) — cf.
+// Scanner_ema50.mqh (K_EMA50_TF, K_EMA50_Period, K_EMA50_SL_Bars,
+// K_EMA50_TP_R).
 //========================================================
 input uint                I_TAILLE_DU_COMPTE     = 25000;          // Taille du compte de trading (balance initiale)
 input ENUM_BALANCE_MODE   K_BalanceMode            = eBM_Compound;  // Mode de calcul du risque
@@ -101,8 +104,10 @@ input double              K_Max_Risk_Auth        = 2.5;           // Risque max 
 // Architecture Koenigin :
 //   - Strategy.mqh     : la LIAISON (orchestre les scanners, envoie les ordres)
 //   - Scanner.mqh      : TEMPLATE de base (classe CScanner concrète)
-//   - Scanner_fibo.mqh : scanner concret CScannerFibo (MODÈLE — non branché)
-//   - À brancher : Scanner_ema50.mqh (CScannerEma50), Scanner_xxx.mqh, ...
+//   - Scanner_ema50.mqh : scanner concret CScannerEma50 (EMA50 crossUp /
+//     SL N bas / TP 2R) — BRANCHÉ
+//   - Scanner_fibo.mqh  : scanner concret CScannerFibo (MODÈLE — non branché)
+//   - Plus tard : Scanner_xxx.mqh, ...
 // =====================================================================
 #include <OPR_Bot/Strategy.mqh>
 
