@@ -309,10 +309,19 @@ bool CStrategy::ExecuteSignal(const string i_scanner_name, STRUCT_STRATEGY &io_d
              __FUNCTION__);
 
     // Envoie l'ordre au broker
-    // Le scanner_name est posé dans le comment de l'ordre par Broker
-    // (voir Broker.mqh : l_Request.comment = i_StrategyName + " X-TYPE")
+    // ✅ FIX VERROU SOLO (constaté sur backtest 2025 US100.cash H1) :
+    // on passe le NOM DU SCANNER (pas le nom EA) à Broker. Broker le pose
+    // dans le comment de l'ordre (l_Request.comment = i_StrategyName +
+    // " X-TYPE") et la position hérite ce comment → HasPositionForSymbol()
+    // la reconnaît (StringFind(comment, m_Name)) et bloque toute nouvelle
+    // entrée tant qu'elle est ouverte — équivalent exact du "not active"
+    // du Pine.
+    // AVANT : DATAS.GetStrategyName() ("KoeniginUS100.cash(H1) - ") → le
+    // comment ne contenait jamais le nom du scanner → le verrou ne voyait
+    // aucune position → empilement (jusqu'à 6 simultanées, 154 entrées sur
+    // 203 prises en violation du SOLO).
     //-----------------------------------------------------------------
-    if (!BROKER.SendOrder(DATAS.GetStrategyName(), io_datas))
+    if (!BROKER.SendOrder(i_scanner_name, io_datas))
     {
         LOG.ERROR(i_scanner_name + " : BROKER.SendOrder a échoué - signal rollback", __FUNCTION__);
         return(false);  // échec → TryXxx appellera RollbackSignal
