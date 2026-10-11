@@ -33,7 +33,7 @@
 //                                                      //
 //////////////////////////////////////////////////////////
 #define K_Magic               1000000               // Magic number :  avec N° du bot
-#define K_Repertory           "Bot_OPR\\"
+#define K_Repertory           "Koenigin\\"
 #define K_SoftName            "Koenigin"
 #define K_AlertSoundName      "alert.wav"
 #define K_Cyclic              1                     // Traitement cyclique toutes les secondes
