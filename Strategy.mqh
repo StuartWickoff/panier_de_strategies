@@ -8,12 +8,13 @@
 //|   - Détient les ressources partagées (CDatas DATAS)              |
 //|   - Détient un ou plusieurs membres scanner EXPLICITES          |
 //|     (ici : CScannerEma50 m_Ema50Scanner,                        |
-//|            CScannerRsi7  m_Rsi7Scanner)                        |
+//|            CScannerRsi7  m_Rsi7Scanner,                         |
+//|            CScannerBb10  m_Bb10Scanner)                         |
 //|   - Detection() : un SCHEDULER indépendant par scanner (son TF), |
 //|     l'état des scanners À ÉTAT évolue AVANT les filtres, puis   |
 //|     chaque scanner SÉLECTIONNÉ est appelé via TryXxx()          |
-//|     (panier : K_EMA50_Trade / K_RSI7_Trade, false par défaut —  |
-//|      greffé ≠ tradé)                                             |
+//|     (panier : K_EMA50_Trade / K_RSI7_Trade / K_BB10_Trade,      |
+//|      false par défaut — greffé ≠ tradé)                         |
 //|   - ManagePositions() délègue à scanner.OnTick()                 |
 //|   - SetTicket/GetPositionNb/DeleteDetection/CloseOfPositions    |
 //|     → délèguent à DATAS partagé                                  |
@@ -65,6 +66,7 @@
 // dont son toggle de sélection K_Xxx_Trade (panier).
 #include <Koenigin/Scanner_ema50.mqh>
 #include <Koenigin/Scanner_rsi7.mqh>
+#include <Koenigin/Scanner_bb10.mqh>
 // Pour en brancher un autre :
 // #include <Koenigin/Scanner_xxx.mqh>
 
@@ -90,6 +92,7 @@ private:
     //-----------------------------------------------------------------
     CScannerEma50 m_Ema50Scanner;
     CScannerRsi7  m_Rsi7Scanner;
+    CScannerBb10  m_Bb10Scanner;
 
     // État interne
     //------------
@@ -104,12 +107,14 @@ private:
     //----------------------------------------------------------------
     datetime        m_LastEma50BarTime;
     datetime        m_LastRsi7BarTime;
+    datetime        m_LastBb10BarTime;
 
     // Helpers d'exécution (communs à tous les scanners)
     //---------------------------------------------------
     bool ExecuteSignal(const string i_scanner_name, STRUCT_STRATEGY &io_datas);  // retourne TRUE si ordre envoyé avec succès
     void TryEma50(const MqlTick &i_tick);
     void TryRsi7(const MqlTick &i_tick);
+    void TryBb10(const MqlTick &i_tick);
 
 //==================================
 //--- PUBLIC
@@ -130,6 +135,7 @@ public:
         //---------------------------------------------------------------
         m_LastEma50BarTime = 0;
         m_LastRsi7BarTime  = 0;
+        m_LastBb10BarTime  = 0;
 
         // 1. Configure les données partagées
         //-------------------------------------
@@ -150,6 +156,11 @@ public:
             LOG.ERROR(DATAS.GetStrategyName() + "Initialisation scanner RSI7 échouée", __FUNCTION__);
             return(false);
         }
+        if (!m_Bb10Scanner.Config("Bb10Scanner", K_BB10_TF))
+        {
+            LOG.ERROR(DATAS.GetStrategyName() + "Initialisation scanner BB10 échouée", __FUNCTION__);
+            return(false);
+        }
 
         // PANIER : annonce une fois le statut de chaque scanner
         // (greffé ≠ tradé — mémorisé dans le journal au démarrage)
@@ -163,6 +174,11 @@ public:
             LOG.INFO(DATAS.GetStrategyName() + "Panier : RSI7 SOLO sélectionné (K_RSI7_Trade=true) — trade ACTIF", __FUNCTION__);
         else
             LOG.INFO(DATAS.GetStrategyName() + "Panier : RSI7 SOLO non sélectionné (K_RSI7_Trade=false) — DORMANT, aucun trade", __FUNCTION__);
+
+        if (K_BB10_Trade)
+            LOG.INFO(DATAS.GetStrategyName() + "Panier : BB10 SOLO sélectionné (K_BB10_Trade=true) — trade ACTIF", __FUNCTION__);
+        else
+            LOG.INFO(DATAS.GetStrategyName() + "Panier : BB10 SOLO non sélectionné (K_BB10_Trade=false) — DORMANT, aucun trade", __FUNCTION__);
 
         m_InitOk = true;
         LOG.INFO(DATAS.GetStrategyName() + "Stratégie (liaison) initialisée avec succès", __FUNCTION__);
@@ -180,6 +196,7 @@ public:
         //----------------------
         m_Ema50Scanner.End();
         m_Rsi7Scanner.End();
+        m_Bb10Scanner.End();
 
         // Flush les données
         //-------------------
@@ -254,6 +271,7 @@ public:
         //-----------------------------------------------------------------------
         bool l_NewEma50 = false;
         bool l_NewRsi7  = false;
+        bool l_NewBb10  = false;
 
         datetime l_BarTime = iTime(Symbol(), K_EMA50_TF, 0);
         if (l_BarTime == 0)
@@ -281,7 +299,24 @@ public:
             l_NewRsi7 = true;
         }
 
-        if (!l_NewEma50 && !l_NewRsi7) return;  // aucune nouvelle bougie → on attend
+        datetime l_Bb10BarTime = iTime(Symbol(), K_BB10_TF, 0);
+        if (l_Bb10BarTime == 0)
+        {
+            LOG.WARNING(DATAS.GetStrategyName() + "iTime(K_BB10_TF) indisponible", __FUNCTION__);
+        }
+        else if (l_Bb10BarTime != m_LastBb10BarTime)
+        {
+            // BB10 : SANS ÉTAT (schéma EMA50). La validation immédiate est
+            // sûre : un échec de lecture CopyClose dans GetSignal ne
+            // corrompt aucune mémoire — la bougie est sans signal, comme
+            // une alerte Pine non prise (validé par l'audit RSI7 pour les
+            // scanners sans état).
+            //---------------------------------------------------------------
+            m_LastBb10BarTime = l_Bb10BarTime;
+            l_NewBb10 = true;
+        }
+
+        if (!l_NewEma50 && !l_NewRsi7 && !l_NewBb10) return;  // aucune nouvelle bougie → on attend
 
         // ✅ FIX ChatGPT #1 : l'état AVANT les filtres.
         // RSI7 = scanner À ÉTAT : la machine à pivots tourne à CHAQUE
@@ -310,7 +345,10 @@ public:
             else
             {
                 l_NewRsi7 = false;                   // retry au tick suivant (même bougie)
-                if (!l_NewEma50) return;             // rien d'autre à faire ce tick
+                // NB : BB10/EMA50 (sans état, horodatage déjà validé)
+                // ne sont PAS bloqués par le retry RSI7 — sinon une
+                // panne Copy* du RSI7 avalerait leurs bougies.
+                if (!l_NewEma50 && !l_NewBb10) return;   // rien d'autre à faire ce tick
             }
         }
 
@@ -344,6 +382,7 @@ public:
         //---------------------------------------------------------------
         if (l_NewEma50 && K_EMA50_Trade) TryEma50(l_Tick);
         if (l_NewRsi7  && K_RSI7_Trade)  TryRsi7(l_Tick);
+        if (l_NewBb10  && K_BB10_Trade)  TryBb10(l_Tick);
     }
 
     //+--------------------------------------------------------+
@@ -517,6 +556,45 @@ void CStrategy::TryRsi7(const MqlTick &i_tick)
 }
 
 //+------------------------------------------------------------------+
+//| TryBb10                                                            |
+//| Orchestration du scanner BB10 :                                   |
+//|   1. Verrou SOLO (position ouverte → pas de nouvelle entrée,      |
+//|      Pine : "not active" — filtré par LE nom de CE scanner)      |
+//|   2. GetSignal() — réintégration de bande à la clôture ;          |
+//|      SL = extrême N bougies ; TP = 3R ; long (bande basse)        |
+//|      + short optionnel (bande haute, input K_BB10_Short)         |
+//|   3. Si signal → ExecuteSignal                                     |
+//|                                                                  |
+//| Note : BB10 = ordres au marché uniquement → pas de verrou         |
+//| pending. Le signal est sans état (réintégration = propriété de la |
+//| bougie) : un échec d'ExecuteSignal ne se rollbacke pas — le trade |
+//| est manqué, comme une alerte Pine non exécutée.                  |
+//+------------------------------------------------------------------+
+void CStrategy::TryBb10(const MqlTick &i_tick)
+{
+    // VERROU SOLO (1 trade simultané max — Pine-fidèle)
+    //----------------------------------------------------
+    if (m_Bb10Scanner.HasPositionForSymbol())
+    {
+        return;
+    }
+
+    // RÉCUPÉRATION DU SIGNAL (réintégration sur la bougie qui vient
+    // de clôturer — bande recalculée à la demande, sans état)
+    //------------------------------------------------------------------
+    STRUCT_STRATEGY l_Datas;
+    ZeroMemory(l_Datas);
+    if (!m_Bb10Scanner.GetSignal(i_tick, l_Datas))
+    {
+        return;  // pas de signal
+    }
+
+    // EXÉCUTION (DATAS + MONEY + BROKER)
+    //---------------------------------------
+    ExecuteSignal(m_Bb10Scanner.GetNamePublic(), l_Datas);
+}
+
+//+------------------------------------------------------------------+
 //| Ajouter un scanner = définir son TryXxx() ici :                   |
 //|   1. Scanner_xxx.mqh : input bool K_Xxx_Trade = false (panier)   |
 //|   2. Un membre + un scheduler m_LastXxxBarTime (init 0 au Config) |
@@ -524,6 +602,7 @@ void CStrategy::TryRsi7(const MqlTick &i_tick)
 //|      le scanner est À ÉTAT → m_XxxScanner.UpdateState() AVANT les |
 //|      filtres ET valider l'horodatage seulement après un retour     |
 //|      TRUE (échec = retry au tick suivant, jamais de bougie perdue) ;|
+//|      sinon (SANS ÉTAT) validation immédiate (schéma EMA50/BB10) ;  |
 //|      puis if (new_xxx && K_Xxx_Trade) TryXxx(l_Tick);  |
 //|   4. TryXxx : verrous → m_XxxScanner.GetSignal() →               |
 //|      ExecuteSignal()                                              |
