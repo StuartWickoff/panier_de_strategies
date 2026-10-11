@@ -1,16 +1,19 @@
 //+------------------------------------------------------------------+
 //|                                                                  |
-//| Scanner_ema50.mqh — SCANNER EMA50 SOLO (crossUp / SL N bas / TP 2R)|
+//| Scanner_ema50.mqh — SCANNER EMA50 SOLO (crossUp + crossDown opt.)|
 //|                                                                  |
 //| Adaptation du script Pine "SCANNER NASDAQ EMA50 | SOLO | SL10    |
 //| | TP2R" (H1) dans l'architecture parallèle multi-scanners de     |
 //| Koenigin.                                                        |
 //|                                                                  |
 //| - Classe CONCRETE CScannerEma50 (pas d'héritage, pas de virtual)|
-//| - Bull uniquement (achats)                                        |
-//| - Entrée : clôture franchit l'EMA vers le haut (crossUp)         |
-//| - SL = plus bas des N dernières bougies, bougie signal incluse   |
-//| - TP = entry + 2R (basé sur ask réel d'exécution)                |
+//| - LONG : crossUp — toujours actif (le Pine d'origine est        |
+//|   long uniquement, fidélité Pine stricte)                       |
+//| - SHORT : crossDown (miroir exact du long) — OPTIONNEL, input   |
+//|   K_EMA50_Short = false par défaut (off = fidélité Pine)        |
+//| - SL long = plus bas des N bougies ; SL short = plus HAUT       |
+//|   (bougie signal incluse, N = K_EMA50_SL_Bars)                  |
+//| - TP long = entry + 2R (ask) ; TP short = entry - 2R (bid)      |
 //| - 1 trade simultané max (HasPositionForSymbol) — le verrou SOLO |
 //|   ... et UNIQUEMENT si sélectionné dans le panier (K_EMA50_Trade) |
 //| - Entrée au marché (IsMarketOrder = true) au 1er tick qui suit   |
@@ -82,6 +85,11 @@ input ENUM_TIMEFRAMES    K_EMA50_TF      = PERIOD_H1;   // TF de travail (Pine :
 input uint               K_EMA50_Period  = 50;          // Période EMA (Pine : 50)
 input uint               K_EMA50_SL_Bars = 10;          // Plus bas de combien de bougies pour le SL (Pine : 10)
 input double             K_EMA50_TP_R    = 2.0;         // Objectif TP en R (Pine : 2R)
+// SHORT OPTIONNEL : le Pine d'origine est long uniquement (crossUp,
+// Pine l.21). K_EMA50_Short=true ajoute le miroir : crossDown =
+// Close[1] < EMA[1] ET Close[2] >= EMA[2] ; SL = plus HAUT des N
+// bougies ; TP = bid - 2R. False par défaut = fidélité Pine.
+input bool               K_EMA50_Short   = false;       // Activer short (Pine : long uniquement)
 
 //////////////////////////////////////////////////////////
 //                                                      //
@@ -184,8 +192,12 @@ public:
     //| de clôturer (shift=1, appel au 1er tick de la nouvelle  |
     //| bougie — équivalent barstate.isconfirmed du Pine) :     |
     //|   - historique suffisant (Pine : bar_index >= 200)      |
-    //|   - crossUp : Close[1] > EMA[1] ET Close[2] <= EMA[2]   |
-    //|   - SL = plus bas des K_EMA50_SL_Bars bougies (1..N)    |
+    //|   - LONG crossUp (Pine l.21, toujours actif) :          |
+    //|     Close[1] > EMA[1] ET Close[2] <= EMA[2]             |
+    //|   - SHORT crossDown (si K_EMA50_Short, miroir) :        |
+    //|     Close[1] < EMA[1] ET Close[2] >= EMA[2]             |
+    //|   - SL : plus bas (long) / plus HAUT (short) des        |
+    //|     K_EMA50_SL_Bars bougies, bougie signal incluse      |
     //|   - risque > tick size (Pine : close - stop > mintick)  |
     //|                                                          |
     //| INPUT:                                                   |
@@ -223,51 +235,103 @@ public:
         double ema1 = ema_buf[0];   // EMA bougie signal (shift 1)
         double ema2 = ema_buf[1];   // EMA bougie précédente (shift 2)
 
-        // === CROSSUP (Pine : close > ema and close[1] <= ema[1]) ===
+        // === DÉTECTION DE SENS (une bougie ne peut pas croiser   ===
+        // === dans les deux sens à la fois : jamais d'ambiguïté)  ===
         //--------------------------------------------------------------
-        bool crossUp = (close1 > ema1) && (close2 <= ema2);
-        if (!crossUp) return(false);
-
-        // === SL = PLUS BAS DES N BOUGIES, BOUGIE SIGNAL INCLUSE ===
-        // (Pine : ta.lowest(low, 10) évalué sur la bougie de signal)
+        // LONG  (Pine l.21, toujours actif) :
+        //   crossUp   = close > ema and close[1] <= ema[1]
+        // SHORT (miroir, absent du Pine — gated par K_EMA50_Short) :
+        //   crossDown = close < ema and close[1] >= ema[1]
         //--------------------------------------------------------------
-        int lowest_idx = iLowest(Symbol(), m_TF, MODE_LOW, (int)K_EMA50_SL_Bars, 1);
-        if (lowest_idx < 0) return(false);
-        double sl = iLow(Symbol(), m_TF, lowest_idx);
+        bool crossUp   = (close1 > ema1) && (close2 <= ema2);
+        bool crossDown = K_EMA50_Short && (close1 < ema1) && (close2 >= ema2);
+        if (!crossUp && !crossDown) return(false);
 
-        // === ENTRÉE = ASK RÉEL D'EXÉCUTION ===
-        // (équivalent live du "close" du Pine : l'ordre part au 1er
-        //  tick de la bougie suivante — convention projet, cf. Fibo)
-        //--------------------------------------------------------------
-        double entry = i_tick.ask;
-
-        // === FILTRE ANTI-RISQUE-NUL ===
-        // (Pine : close - stopCandidate > syminfo.mintick)
-        //------------------------------------------------
+        // Tick size (filtre anti-risque-nul, commun aux deux sens)
+        //-----------------------------------------------------------
         double min_tick = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_SIZE);
         if (min_tick <= 0.0) min_tick = _Point;
-        double risk = entry - sl;
+
+        if (crossUp)
+        {
+            // === LONG : SL = PLUS BAS DES N BOUGIES ===
+            // (Pine : ta.lowest(low, 10) sur la bougie de signal)
+            //------------------------------------------------------
+            int lowest_idx = iLowest(Symbol(), m_TF, MODE_LOW, (int)K_EMA50_SL_Bars, 1);
+            if (lowest_idx < 0) return(false);
+            double sl = iLow(Symbol(), m_TF, lowest_idx);
+
+            // === ENTRÉE = ASK RÉEL D'EXÉCUTION ===
+            // (équivalent live du "close" du Pine : l'ordre part au 1er
+            //  tick de la bougie suivante — convention projet, cf. Fibo)
+            //----------------------------------------------------------
+            double entry = i_tick.ask;
+
+            // === FILTRE ANTI-RISQUE-NUL ===
+            // (Pine : close - stopCandidate > syminfo.mintick)
+            double risk = entry - sl;
+            if (risk <= min_tick) return(false);
+
+            // === SIGNAL D'ACHAT → REMPLIR STRUCT_STRATEGY ===
+            //------------------------------------------------
+            ZeroMemory(o_datas);
+            o_datas.Trend         = eT_Bull;
+            o_datas.Entry         = entry;                         // entrée marché au prix courant
+            o_datas.StopLoss      = sl;                            // plus bas des N bougies
+            o_datas.TakeProfit    = entry + K_EMA50_TP_R * risk;   // TP = K_EMA50_TP_R R
+            o_datas.IsMarketOrder = true;                          // ordre au marché
+
+            LOG.INFO(m_Name + " : EMA50 ACHAT crossUp | Close=" +
+                     DoubleToString(close1, _Digits) +
+                     " | EMA="       + DoubleToString(ema1, _Digits) +
+                     " | SL "        + IntegerToString((int)K_EMA50_SL_Bars) + " bars=" +
+                                      DoubleToString(sl, _Digits) +
+                     " | Ask="       + DoubleToString(entry, _Digits) +
+                     " | TP="        + DoubleToString(o_datas.TakeProfit, _Digits) +
+                     " | R="         + DoubleToString(K_EMA50_TP_R, 2),
+                     __FUNCTION__);
+            return(true);
+        }
+
+        // === SHORT : MIROIR EXACT DU LONG (crossDown) ===
+        //--------------------------------------------------
+        // SL = plus HAUT des N bougies ; entrée = bid réel ;
+        // TP = entry - K_EMA50_TP_R R (sous l'entrée).
+        // Le verrou SOLO reste partagé : une position à la fois,
+        // long OU short (HasPositionForSymbol ne distingue pas le
+        // sens — fidèle au "active" du Pine).
+        //----------------------------------------------------
+        int highest_idx = iHighest(Symbol(), m_TF, MODE_HIGH, (int)K_EMA50_SL_Bars, 1);
+        if (highest_idx < 0) return(false);
+        double sl = iHigh(Symbol(), m_TF, highest_idx);
+
+        // Entrée = bid réel (miroir de l'ask long)
+        //--------------------------------------------
+        double entry = i_tick.bid;
+
+        // Filtre anti-risque-nul, sens short : sl - entry > mintick
+        //-------------------------------------------------------------
+        double risk = sl - entry;
         if (risk <= min_tick) return(false);
 
-        // === SIGNAL D'ACHAT CONFIRMÉ → REMPLIR STRUCT_STRATEGY ===
-        //----------------------------------------------------------
+        // === SIGNAL DE VENTE → REMPLIR STRUCT_STRATEGY ===
+        //---------------------------------------------------
         ZeroMemory(o_datas);
-        o_datas.Trend         = eT_Bull;
-        o_datas.Entry         = entry;                            // entrée marché au prix courant
-        o_datas.StopLoss      = sl;                               // plus bas des N bougies
-        o_datas.TakeProfit    = entry + K_EMA50_TP_R * risk;      // TP = K_EMA50_TP_R R
-        o_datas.IsMarketOrder = true;                             // ordre au marché
+        o_datas.Trend         = eT_Bear;
+        o_datas.Entry         = entry;                         // entrée marché au prix courant
+        o_datas.StopLoss      = sl;                            // plus haut des N bougies
+        o_datas.TakeProfit    = entry - K_EMA50_TP_R * risk;   // TP = K_EMA50_TP_R R (sous l'entrée)
+        o_datas.IsMarketOrder = true;                          // ordre au marché
 
-        LOG.INFO(m_Name + " : EMA50 ACHAT crossUp | Close=" +
+        LOG.INFO(m_Name + " : EMA50 VENTE crossDown | Close=" +
                  DoubleToString(close1, _Digits) +
                  " | EMA="       + DoubleToString(ema1, _Digits) +
                  " | SL "        + IntegerToString((int)K_EMA50_SL_Bars) + " bars=" +
                                   DoubleToString(sl, _Digits) +
-                 " | Ask="       + DoubleToString(entry, _Digits) +
+                 " | Bid="       + DoubleToString(entry, _Digits) +
                  " | TP="        + DoubleToString(o_datas.TakeProfit, _Digits) +
                  " | R="         + DoubleToString(K_EMA50_TP_R, 2),
                  __FUNCTION__);
-
         return(true);
     }
 

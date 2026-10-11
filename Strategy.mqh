@@ -354,7 +354,8 @@ bool CStrategy::ExecuteSignal(const string i_scanner_name, STRUCT_STRATEGY &io_d
 //| Orchestration du scanner EMA50 :                                   |
 //|   1. Verrou SOLO (position ouverte → pas de nouvelle entrée,      |
 //|      Pine : "not active")                                         |
-//|   2. GetSignal() — crossUp EMA50 + SL plus bas N bougies + TP 2R  |
+//|   2. GetSignal() — crossUp (long) et, si K_EMA50_Short,          |
+//|      crossDown (short) ; SL = extrême N bougies ; TP = 2R        |
 //|   3. Si signal → ExecuteSignal                                     |
 //|                                                                  |
 //| Note : EMA50 = ordres au marché uniquement → pas de verrou         |

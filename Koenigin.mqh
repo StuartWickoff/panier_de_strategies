@@ -104,8 +104,9 @@ input double              K_Max_Risk_Auth        = 2.5;           // Risque max 
 // Architecture Koenigin :
 //   - Strategy.mqh     : la LIAISON (orchestre les scanners, envoie les ordres)
 //   - Scanner.mqh      : TEMPLATE de base (classe CScanner concrète)
-//   - Scanner_ema50.mqh : scanner concret CScannerEma50 (EMA50 crossUp /
-//     SL N bas / TP 2R) — BRANCHÉ, trade soumis à sélection panier (K_EMA50_Trade, false par défaut)
+//   - Scanner_ema50.mqh : scanner concret CScannerEma50 (EMA50 crossUp
+//     long + crossDown short optionnel K_EMA50_Short / SL N extrêmes /
+//     TP 2R) — BRANCHÉ, trade soumis à sélection panier (K_EMA50_Trade, false par défaut)
 //   - Scanner_fibo.mqh  : scanner concret CScannerFibo (MODÈLE — non branché)
 //   - Plus tard : Scanner_xxx.mqh, ...
 // =====================================================================
