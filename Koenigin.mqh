@@ -120,11 +120,14 @@ input double              K_Max_Risk_Auth        = 2.5;           // Risque max 
 //     réintégration : LONG = 1re clôture de retour au-dessus de la
 //     bande basse (Pine 05_BOLLINGER, SL5 TP3R) + short optionnel
 //     K_BB10_Short (miroir bande haute — touche personnelle Koenigin) ;
-//     bande calculée à la demande (SMA + stdev population manuelles),
-//     scanner SANS ÉTAT (schéma EMA50) ; sizing = module MONEY —
-//     capital virtuel du Pine non reproduit (décision utilisateur)) —
-//     BRANCHÉ, trade soumis à sélection panier (K_BB10_Trade, false
-//     par défaut)
+//     bande calculée à la demande (SMA + stdev population manuelles) ;
+//     SANS ÉTAT glissant mais décision FIGÉE par bougie : EvaluateBar()
+//     avant filtres (contrat bool — retry au tick suivant si lecture
+//     impossible, signal préservé) + armement au démarrage (aucune
+//     entrée rétroactive) + validation fail-fast des inputs ; sizing =
+//     module MONEY — capital virtuel du Pine non reproduit (décision
+//     utilisateur)) — BRANCHÉ, trade soumis à sélection panier
+//     (K_BB10_Trade, false par défaut)
 //   - Scanner_fibo.mqh  : scanner concret CScannerFibo (MODÈLE — non branché)
 //   - Plus tard : Scanner_xxx.mqh, ...
 // =====================================================================

@@ -39,8 +39,9 @@
 //| - "TF Valide" (graphe H1 imposé)     → K_BB10_TF (le scanner     |
 //|   travaille sur SON TF, quel que soit le TF du chart)             |
 //| - barstate.isconfirmed              → anti-rejeu de CStrategy :  |
-//|   GetSignal n'est appelé qu'au 1er tick de chaque nouvelle bougie |
-//|   K_BB10_TF (la bougie signal = shift 1, clôturée)                |
+//|   EvaluateBar() est appelé au 1er tick de chaque nouvelle bougie |
+//|   K_BB10_TF (la bougie signal = shift 1, clôturée) et FIGE la     |
+//|   décision ; GetSignal() la consomme après les filtres            |
 //| - ÉTAT PERSISTANT (active/entry/sl/tp)→ position RÉELLE : le      |
 //|   verrou SOLO = HasPositionForSymbol, le bracket SL/TP est posé  |
 //|   avec l'ordre et géré par le broker                              |
@@ -70,15 +71,52 @@
 //|   → non reproduites : artefacts de la simulation TradingView.     |
 //|   Garde symbole = I_Symbol_Name au niveau EA, TF = K_BB10_TF.     |
 //|                                                                  |
+//| === AUDIT BB10 (revue externe) — 2 correctifs + 1 documentation ===|
+//|                                                                  |
+//| - P1-1 DÉMARRAGE SANS ENTRÉE RÉTROACTIVE : au premier contact du  |
+//|   scheduler (m_LastBb10BarTime encore à 0), la bougie courante    |
+//|   devient la RÉFÉRENCE sans être une opportunité : la bougie      |
+//|   clôturée AVANT le lancement de l'EA n'est jamais évaluée.       |
+//|   Sémantique alerte Pine : l'EA ne trade que les bougies qu'il a  |
+//|   vues se former. La prochaine nouvelle bougie est traitée        |
+//|   normalement (implémentation dans Strategy.mqh).                 |
+//|                                                                  |
+//| - P1-2 SIGNAL PRÉSERVÉ SUR PANNE DE LECTURE : la bougie n'est     |
+//|   validée (horodatage mémorisé par le scheduler) qu'APRÈS une     |
+//|   lecture de données RÉUSSIE. EvaluateBar() retourne FALSE si     |
+//|   CopyClose/iLowest/iHighest échoue → le scheduler ne valide PAS  |
+//|   la bougie et la réessaie au tick suivant. Trois états distincts |
+//|   (données indisponibles → RETRY ; données OK sans signal →       |
+//|   bougie CONSOMMÉE ; signal → exécution après filtres). Une       |
+//|   bougie n'est jamais traitée deux fois (idempotence : la bougie  |
+//|   clôturée ne change plus). Si la panne dure toute la bougie      |
+//|   suivante, la bougie signal est abandonnée (entrée périmée =     |
+//|   non tradable, comme une alerte reçue hors ligne) — pas de       |
+//|   rattrapage, contrairement au RSI7 dont l'ÉTAT pivots doit       |
+//|   rester complet pour les gaps futurs.                            |
+//|                                                                  |
+//| - P2 COHÉRENCE DES PRIX (écart documenté, non restructuré) : le   |
+//|   lot (MONEY) et le TP sont calculés sur l'entrée du tick de      |
+//|   détection ; Broker relit un tick frais juste avant OrderSend.  |
+//|   Dans le TESTEUR, les deux lectures voient le MÊME tick (figé    |
+//|   pendant l'OnTick) → zéro écart en backtest/parité. En live,     |
+//|   l'écart résiduel est borné au mouvement d'un tick pendant les   |
+//|   microsecondes du calcul de lot (même pile d'appel). Ré-ancrer   |
+//|   le TP sur le fill réel (TRADE_ACTION_SLTP post-fill) toucherait |
+//|   le pipeline partagé EMA50/RSI7 → volontairement non fait        |
+//|   (mandat : correctifs ciblés, pas de modification globale).      |
+//|                                                                  |
 //| Le scanner ne fait AUCUN appel direct à BROKER, MONEY ou DATAS.  |
 //| Il remplit STRUCT_STRATEGY et CStrategy fait le reste.            |
 //|                                                                  |
-//| Pas d'UpdateState : le scanner est SANS ÉTAT (la bande et le      |
-//| signal se recalculent à la demande sur les bougies ; rien ne      |
-//| survit d'une bougie à l'autre). Un échec de lecture (CopyClose)   |
-//| ne corrompt rien : la bougie est sans signal, comme une alerte    |
-//| Pine non prise (schéma EMA50, validé par l'audit RSI7 pour les    |
-//| scanners sans mémoire).                                          |
+//| ARCHITECTURE : SANS ÉTAT glissant (pas de machine à pivots type  |
+//| RSI7 — la bande se recalcule à la demande sur P+1 barres), mais  |
+//| avec une DÉCISION FIGÉE PAR BOUGIE : EvaluateBar() (appelé par   |
+//| le scheduler AVANT les filtres, pattern UpdateState RSI7 adapté  |
+//| au sans-état) lit les données et stocke la décision de la bougie |
+//| clôturée (sens + SL + niveaux, propriétés immuables de la        |
+//| bougie) ; GetSignal() consomme cette décision au moment de       |
+//| l'exécution (garde ask/bid sur le tick courant uniquement).      |
 //| Pas de verrou pending : ordres au marché uniquement.              |
 //+------------------------------------------------------------------+
 
@@ -154,6 +192,18 @@ private:
     string          m_Name;             // Nom logique ("Bb10Scanner") — préfixe du comment d'ordre
     ENUM_TIMEFRAMES m_TF;               // Timeframe de travail (K_BB10_TF)
 
+    // Décision FIGÉE de la dernière bougie clôturée évaluée
+    // (✅ FIX AUDIT BB10 P1-2 : EvaluateBar → GetSignal). Ce ne sont
+    // PAS des états glissants type machine à pivots : ce sont les
+    // propriétés immuables de la bougie clôturée, posées une fois
+    // pour toutes à son évaluation et consommées par GetSignal au
+    // moment de l'exécution.
+    //----------------------------------------------------------------
+    int             m_BarDir;           // 0 = pas de signal (ou rejeté par le filtre Pine), +1 = long, -1 = short
+    double          m_BarSL;            // SL du signal : extrême des K_BB10_SL_Bars bougies (signal incluse)
+    double          m_BarClose;         // clôture de la bougie signal (journal)
+    double          m_BarBand;          // bande de réintégration : basse (long) / haute (short) (journal)
+
     //+--------------------------------------------------------+
     //| BandsAt                                                 |
     //| Bollinger d'une fenêtre de P clôtures, dans le tableau  |
@@ -210,6 +260,50 @@ public:
         m_Name = i_name;
         m_TF   = i_tf;
 
+        // Réinitialise la décision figée (hygiène de démarrage)
+        //--------------------------------------------------------
+        m_BarDir   = 0;
+        m_BarSL    = 0.0;
+        m_BarClose = 0.0;
+        m_BarBand  = 0.0;
+
+        // ✅ FIX AUDIT BB10 (point 4) : validation FAIL-FAST des
+        // paramètres. Les valeurs PAR DÉFAUT = référence Pine (H1,
+        // 10, 2.0, 5, 3R, long seul) ; une configuration invalide
+        // faisait auparavant dégrader le scanner EN SILENCE (signaux
+        // jamais émis ou rejetés au broker) → refus explicite au
+        // démarrage de l'EA.
+        //---------------------------------------------------------------
+        if (K_BB10_Period < 2)
+        {
+            LOG.ERROR(m_Name + " : K_BB10_Period invalide (" +
+                      IntegerToString((int)K_BB10_Period) +
+                      ") — minimum 2 requis (référence Pine : 10)", __FUNCTION__);
+            return(false);
+        }
+        if (K_BB10_Sigma <= 0.0)
+        {
+            LOG.ERROR(m_Name + " : K_BB10_Sigma invalide (" +
+                      DoubleToString(K_BB10_Sigma, 2) +
+                      ") — strictement positif requis (référence Pine : 2.0)", __FUNCTION__);
+            return(false);
+        }
+        if (K_BB10_SL_Bars < 1)
+        {
+            LOG.ERROR(m_Name + " : K_BB10_SL_Bars invalide (" +
+                      IntegerToString((int)K_BB10_SL_Bars) +
+                      ") — minimum 1 requis (référence Pine : 5)", __FUNCTION__);
+            return(false);
+        }
+        if (K_BB10_TP_R <= 0.0)
+        {
+            LOG.ERROR(m_Name + " : K_BB10_TP_R invalide (" +
+                      DoubleToString(K_BB10_TP_R, 2) +
+                      ") — strictement positif requis (référence Pine : 3R)", __FUNCTION__);
+            return(false);
+        }
+
+
         LOG.INFO(m_Name + " : Scanner BB10 SOLO initialisé (TF=" +
                  PeriodToString(m_TF) +
                  ", BB="    + IntegerToString((int)K_BB10_Period) +
@@ -252,40 +346,54 @@ public:
     }
 
     //+--------------------------------------------------------+
-    //| GetSignal                                               |
+    //| EvaluateBar                                             |
     //|--------------------------------------------------------|
-    //| Vérifie les conditions d'entrée sur la bougie qui vient |
-    //| de clôturer (shift=1, appel au 1er tick de la nouvelle  |
-    //| bougie — équivalent barstate.isconfirmed du Pine) :     |
-    //|   - historique suffisant (Pine : bar_index >= 200)      |
-    //|   - LONG réintégration (Pine l.27, toujours actif) :    |
-    //|     close[1] <= lower[1] ET close > lower               |
-    //|   - SHORT réintégration (si K_BB10_Short, miroir        |
-    //|     bande haute) : close[1] >= upper[1] ET close<upper  |
-    //|   - SL : plus bas (long) / plus HAUT (short) des        |
-    //|     K_BB10_SL_Bars bougies, bougie signal incluse       |
-    //|   - filtre Pine sur la CLÔTURE puis garde d'exécution   |
-    //|     sur le prix réel (convention audit RSI7 P1-2)       |
-    //|                                                          |
-    //| INPUT:                                                   |
-    //|   i_tick : tick courant (ask/bid réels d'exécution)     |
-    //| OUTPUT:                                                  |
-    //|   o_datas : STRUCT_STRATEGY rempli si retourne TRUE     |
-    //|   Retour : TRUE si signal émis, FALSE sinon             |
-    //|                                                          |
-    //| IMPORTANT : ne JAMAIS appeler BROKER/MONEY/DATAS ici.   |
-    //| CStrategy fait le relais après réception du signal.     |
+    //| ✅ FIX AUDIT BB10 P1-2 : évalue la bougie qui vient de   |
+    //| clôturer (shift 1) et FIGE sa décision (sens + SL +      |
+    //| niveaux). Appelé par CStrategy::Detection() au 1er tick  |
+    //| de chaque nouvelle bougie K_BB10_TF, AVANT les filtres   |
+    //| d'exécution (pattern UpdateState RSI7, adapté au         |
+    //| sans-état).                                             |
+    //|                                                         |
+    //| CONTRAT :                                               |
+    //|   FALSE = données INDISPONIBLES (CopyClose/iLowest/      |
+    //|           iHighest en échec) → le scheduler NE VALIDE    |
+    //|           PAS la bougie → retry au tick suivant (signal  |
+    //|           préservé, jamais perdu sur une panne lecture)  |
+    //|   TRUE  = lecture FAITE → décision figée dans m_BarDir : |
+    //|           0 = pas de signal (ou rejeté par le filtre     |
+    //|           Pine sur la clôture), +1 = long, -1 = short    |
+    //|                                                         |
+    //| Tout ce qui est évalué ici est une PROPRIÉTÉ de la       |
+    //| bougie clôturée (immuable) : bandes, conditions de       |
+    //| réintégration, SL, filtre Pine sur la clôture. La garde  |
+    //| d'exécution (ask/bid) reste dans GetSignal : elle        |
+    //| dépend du tick courant, pas de la bougie.               |
+    //|                                                         |
+    //| Idempotent : rappelé sur la même bougie → même décision. |
+    //|                                                         |
+    //| IMPORTANT : ne JAMAIS appeler BROKER/MONEY/DATAS ici.    |
     //+--------------------------------------------------------+
-    bool GetSignal(const MqlTick &i_tick, STRUCT_STRATEGY &o_datas)
+    bool EvaluateBar(void)
     {
+        // Réinitialise la décision de la bougie
+        //----------------------------------------
+        m_BarDir   = 0;
+        m_BarSL    = 0.0;
+        m_BarClose = 0.0;
+        m_BarBand  = 0.0;
+
         // (1) Historique minimal (Pine : bar_index >= 200 sur la bougie
         //     SIGNAL). Son index Pine = Bars()-2 (shift 0 = bougie
         //     formante = index Bars()-1) → Bars()-2 >= 200, soit
         //     Bars() >= 202. La fenêtre BB du shift 2 exige aussi
         //     P+2 bougies (shifts 0..P+1).
+        //     NB : historique insuffisant = bougie NON ÉLIGIBLE (le
+        //     Pine ne la regarde même pas) → bougie CONSOMMÉE sans
+        //     signal : ce n'est PAS un échec de lecture (pas de retry).
         //----------------------------------------------------------------
         int min_bars = MathMax(BB10_WARMUP_BARS + 2, (int)K_BB10_Period + 2);
-        if (Bars(Symbol(), m_TF) < min_bars) return(false);
+        if (Bars(Symbol(), m_TF) < min_bars) return(true);
 
         // (2) Clôtures des shifts 1..P+1 (une seule lecture)
         //-----------------------------------------------------
@@ -294,18 +402,22 @@ public:
         ArraySetAsSeries(c, true);
         if (CopyClose(Symbol(), m_TF, 1, need, c) < need)
         {
-            LOG.WARNING(m_Name + " : CopyClose indisponible", __FUNCTION__);
-            return(false);
+            LOG.WARNING(m_Name + " : CopyClose indisponible — retry au tick suivant", __FUNCTION__);
+            return(false);   // données indisponibles → bougie NON validée
         }
         double close1 = c[0];   // bougie signal (shift 1)
         double close2 = c[1];   // bougie précédente (shift 2)
-        if (close1 <= 0.0 || close2 <= 0.0) return(false);
+        if (close1 <= 0.0 || close2 <= 0.0)
+        {
+            LOG.WARNING(m_Name + " : clôtures invalides — retry au tick suivant", __FUNCTION__);
+            return(false);   // données corrompues → retry (borné à la bougie)
+        }
 
         // (3) Bandes des bougies signal (shift 1) et précédente (shift 2)
         //------------------------------------------------------------------
         double mid1 = 0.0, sd1 = 0.0, mid2 = 0.0, sd2 = 0.0;
-        if (!BandsAt(c, 0, mid1, sd1)) return(false);   // fenêtre shifts 1..P
-        if (!BandsAt(c, 1, mid2, sd2)) return(false);   // fenêtre shifts 2..P+1
+        if (!BandsAt(c, 0, mid1, sd1)) return(false);   // fenêtre incomplète = lecture KO
+        if (!BandsAt(c, 1, mid2, sd2)) return(false);   // (défensif : CopyClose a fourni P+1)
         double lower1 = mid1 - K_BB10_Sigma * sd1;
         double lower2 = mid2 - K_BB10_Sigma * sd2;
         double upper1 = mid1 + K_BB10_Sigma * sd1;
@@ -333,7 +445,7 @@ public:
         //---------------------------------------------------------------
         bool go_long  = (sd1 > 0.0) && (close2 <= lower2) && (close1 > lower1);
         bool go_short = K_BB10_Short && (sd1 > 0.0) && (close2 >= upper2) && (close1 < upper1);
-        if (!go_long && !go_short) return(false);
+        if (!go_long && !go_short) return(true);   // lecture OK, pas de signal → bougie validée
 
         // Tick size (filtre anti-risque-nul, commun aux deux sens)
         //-----------------------------------------------------------
@@ -348,7 +460,11 @@ public:
             //  bougie signal INCLUSE)
             //------------------------------------------------------
             int lowest_idx = iLowest(Symbol(), m_TF, MODE_LOW, (int)K_BB10_SL_Bars, 1);
-            if (lowest_idx < 0) return(false);
+            if (lowest_idx < 0)
+            {
+                LOG.WARNING(m_Name + " : iLowest indisponible — retry au tick suivant", __FUNCTION__);
+                return(false);   // lecture lows indisponible → retry
+            }
             double sl = iLow(Symbol(), m_TF, lowest_idx);
 
             // === FILTRE PINE SUR LA CLÔTURE (audit RSI7 P1-2) ===
@@ -357,82 +473,153 @@ public:
             // signal — PAS sur le prix d'exécution. Le spread et le
             // mouvement entre la clôture et le 1er tick ne peuvent
             // pas faire accepter une entrée que le Pine rejette.
+            // Rejet = décision figée SANS signal (bougie consommée).
             //--------------------------------------------------------------
-            if (close1 - sl <= min_tick) return(false);   // le Pine aurait rejeté
+            if (close1 - sl <= min_tick)
+            {
+                LOG.INFO(m_Name + " : BB10 ACHAT rejeté par le filtre Pine (distance clôture-SL <= mintick)", __FUNCTION__);
+                return(true);   // le Pine aurait rejeté
+            }
 
-            // === ENTRÉE + GARDE D'EXÉCUTION (distincte du filtre) ===
-            // Adaptation MQL5 : l'ordre part à l'ask réel au 1er tick de
-            // la bougie suivante — il faut un risque strictement positif
-            // (> tick) au prix DISPONIBLE. Le sizing et le TP sont fondés
-            // sur CE prix réel (le TP peut différer du TP simulé Pine de
-            // (ask - close)).
-            //-------------------------------------------------------------------
-            double entry = i_tick.ask;
-            double risk  = entry - sl;
-            if (risk <= min_tick) return(false);
+            // === DÉCISION LONG FIGÉE (propriété de la bougie) ===
+            //------------------------------------------------------
+            m_BarDir   = 1;
+            m_BarSL    = sl;
+            m_BarClose = close1;
+            m_BarBand  = lower1;
 
-            // === SIGNAL D'ACHAT → REMPLIR STRUCT_STRATEGY ===
-            //------------------------------------------------
-            ZeroMemory(o_datas);
-            o_datas.Trend         = eT_Bull;
-            o_datas.Entry         = entry;                       // entrée marché au prix courant
-            o_datas.StopLoss      = sl;                          // plus bas des N bougies
-            o_datas.TakeProfit    = entry + K_BB10_TP_R * risk;  // TP = K_BB10_TP_R R
-            o_datas.IsMarketOrder = true;                        // ordre au marché
-
-            LOG.INFO(m_Name + " : BB10 ACHAT réintégration bande basse | Close=" +
+            LOG.INFO(m_Name + " : BB10 détection ACHAT réintégration bande basse | Close=" +
                      DoubleToString(close1, _Digits) +
                      " | Basse=" + DoubleToString(lower1, _Digits) +
                      " | SL "    + IntegerToString((int)K_BB10_SL_Bars) + " bars=" +
-                                  DoubleToString(sl, _Digits) +
-                     " | Ask="   + DoubleToString(entry, _Digits) +
-                     " | TP="    + DoubleToString(o_datas.TakeProfit, _Digits) +
-                     " | R="     + DoubleToString(K_BB10_TP_R, 2),
+                                  DoubleToString(sl, _Digits),
                      __FUNCTION__);
             return(true);
         }
 
         // === SHORT : MIROIR EXACT DU LONG (bande HAUTE) ===
         //----------------------------------------------------
-        // SL = plus HAUT des N bougies ; entrée = bid réel ;
-        // TP = entry - K_BB10_TP_R R (sous l'entrée).
-        // Le verrou SOLO reste partagé : une position à la fois,
-        // long OU short (HasPositionForSymbol ne distingue pas le
-        // sens — fidèle au "active" du Pine).
+        // SL = plus HAUT des N bougies. Le verrou SOLO reste partagé :
+        // une position à la fois, long OU short (HasPositionForSymbol
+        // ne distingue pas le sens — fidèle au "active" du Pine).
         //----------------------------------------------------
         int highest_idx = iHighest(Symbol(), m_TF, MODE_HIGH, (int)K_BB10_SL_Bars, 1);
-        if (highest_idx < 0) return(false);
+        if (highest_idx < 0)
+        {
+            LOG.WARNING(m_Name + " : iHighest indisponible — retry au tick suivant", __FUNCTION__);
+            return(false);   // lecture highs indisponible → retry
+        }
         double sl = iHigh(Symbol(), m_TF, highest_idx);
 
         // === FILTRE PINE MIROIR : SL - CLÔTURE(bougie signal) > mintick ===
         // (le Pine d'origine n'a pas de short : miroir exact du filtre
         //  close - SL du long, évalué sur la CLÔTURE — audit RSI7 P1-2)
         //--------------------------------------------------------------------
-        if (sl - close1 <= min_tick) return(false);   // le miroir du Pine aurait rejeté
+        if (sl - close1 <= min_tick)
+        {
+            LOG.INFO(m_Name + " : BB10 VENTE rejetée par le filtre Pine miroir (SL-clôture <= mintick)", __FUNCTION__);
+            return(true);   // le miroir du Pine aurait rejeté
+        }
 
-        // === ENTRÉE + GARDE D'EXÉCUTION (distincte du filtre) ===
-        //------------------------------------------------------------
-        double entry = i_tick.bid;
-        double risk  = sl - entry;
-        if (risk <= min_tick) return(false);
+        // === DÉCISION SHORT FIGÉE (propriété de la bougie) ===
+        //--------------------------------------------------------
+        m_BarDir   = -1;
+        m_BarSL    = sl;
+        m_BarClose = close1;
+        m_BarBand  = upper1;
 
-        // === SIGNAL DE VENTE → REMPLIR STRUCT_STRATEGY ===
-        //---------------------------------------------------
-        ZeroMemory(o_datas);
-        o_datas.Trend         = eT_Bear;
-        o_datas.Entry         = entry;                        // entrée marché au prix courant
-        o_datas.StopLoss      = sl;                           // plus haut des N bougies
-        o_datas.TakeProfit    = entry - K_BB10_TP_R * risk;   // TP = K_BB10_TP_R R (sous l'entrée)
-        o_datas.IsMarketOrder = true;                         // ordre au marché
-
-        LOG.INFO(m_Name + " : BB10 VENTE réintégration bande haute | Close=" +
+        LOG.INFO(m_Name + " : BB10 détection VENTE réintégration bande haute | Close=" +
                  DoubleToString(close1, _Digits) +
                  " | Haute=" + DoubleToString(upper1, _Digits) +
                  " | SL "    + IntegerToString((int)K_BB10_SL_Bars) + " bars=" +
-                              DoubleToString(sl, _Digits) +
-                 " | Bid="   + DoubleToString(entry, _Digits) +
-                 " | TP="    + DoubleToString(o_datas.TakeProfit, _Digits) +
-                 " | R="     + DoubleToString(K_BB10_TP_R, 2),
+                              DoubleToString(sl, _Digits),
+                 __FUNCTION__);
+        return(true);
+    }
+
+    //+--------------------------------------------------------+
+    //| GetSignal                                               |
+    //|--------------------------------------------------------|
+    //| Consomme la décision figée par EvaluateBar() (appelé     |
+    //| par Detection() AVANT les filtres). Ne recalcule RIEN :  |
+    //| bandes, conditions, SL et filtre Pine sur la clôture     |
+    //| sont des propriétés immuables de la bougie clôturée.     |
+    //| Seule reste la GARDE D'EXÉCUTION sur le prix réel du     |
+    //| tick courant (adaptation MQL5).                          |
+    //|                                                          |
+    //| INPUT:                                                   |
+    //|   i_tick : tick courant (ask/bid réels d'exécution)      |
+    //| OUTPUT:                                                  |
+    //|   o_datas : STRUCT_STRATEGY rempli si retourne TRUE      |
+    //|   Retour : TRUE si signal émis (décision figée + garde)  |
+    //|                                                          |
+    //| IMPORTANT : ne JAMAIS appeler BROKER/MONEY/DATAS ici.    |
+    //| CStrategy fait le relais après réception du signal.      |
+    //+--------------------------------------------------------+
+    bool GetSignal(const MqlTick &i_tick, STRUCT_STRATEGY &o_datas)
+    {
+        // Bougie sans signal (ou rejetée par le filtre Pine, ou
+        // décision déjà consommée) → rien à exécuter.
+        //------------------------------------------------------------
+        if (m_BarDir == 0) return(false);
+
+        // Tick size (garde anti-risque-nul au prix d'exécution)
+        //-----------------------------------------------------------
+        double min_tick = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_SIZE);
+        if (min_tick <= 0.0) min_tick = _Point;
+
+        if (m_BarDir > 0)
+        {
+            // === LONG : GARDE D'EXÉCUTION + REMPLISSAGE ===
+            // Adaptation MQL5 : l'ordre part à l'ask réel au 1er tick
+            // de la bougie suivante — il faut un risque strictement
+            // positif (> tick) au prix DISPONIBLE. Le sizing et le TP
+            // sont fondés sur CE prix réel (le TP peut différer du TP
+            // simulé Pine de (ask - close)). Écart résiduel documenté
+            // en en-tête (audit P2) : Broker relit un tick frais avant
+            // l'envoi — même tick dans le testeur, écart borné à un
+            // tick en live.
+            //-------------------------------------------------------------------
+            double entry = i_tick.ask;
+            double risk  = entry - m_BarSL;
+            if (risk <= min_tick) return(false);
+
+            ZeroMemory(o_datas);
+            o_datas.Trend         = eT_Bull;
+            o_datas.Entry         = entry;                       // entrée marché au prix courant
+            o_datas.StopLoss      = m_BarSL;                     // plus bas des N bougies (figé)
+            o_datas.TakeProfit    = entry + K_BB10_TP_R * risk;  // TP = K_BB10_TP_R R
+            o_datas.IsMarketOrder = true;                        // ordre au marché
+
+            LOG.INFO(m_Name + " : BB10 ACHAT exécution | Ask=" +
+                     DoubleToString(entry, _Digits) +
+                     " | SL="  + DoubleToString(m_BarSL, _Digits) +
+                     " | TP="  + DoubleToString(o_datas.TakeProfit, _Digits) +
+                     " | R="   + DoubleToString(K_BB10_TP_R, 2),
+                     __FUNCTION__);
+            return(true);
+        }
+
+        // === SHORT : MIROIR EXACT DU LONG ===
+        // Entrée = bid réel ; TP = entry - K_BB10_TP_R R (sous
+        // l'entrée). Garde d'exécution sur le prix disponible.
+        //------------------------------------------------------------
+        double entry = i_tick.bid;
+        double risk  = m_BarSL - entry;
+        if (risk <= min_tick) return(false);
+
+        ZeroMemory(o_datas);
+        o_datas.Trend         = eT_Bear;
+        o_datas.Entry         = entry;                        // entrée marché au prix courant
+        o_datas.StopLoss      = m_BarSL;                     // plus haut des N bougies (figé)
+        o_datas.TakeProfit    = entry - K_BB10_TP_R * risk;   // TP = K_BB10_TP_R R (sous l'entrée)
+        o_datas.IsMarketOrder = true;                         // ordre au marché
+
+        LOG.INFO(m_Name + " : BB10 VENTE exécution | Bid=" +
+                 DoubleToString(entry, _Digits) +
+                 " | SL="  + DoubleToString(m_BarSL, _Digits) +
+                 " | TP="  + DoubleToString(o_datas.TakeProfit, _Digits) +
+                 " | R="   + DoubleToString(K_BB10_TP_R, 2),
                  __FUNCTION__);
         return(true);
     }

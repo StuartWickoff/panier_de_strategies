@@ -11,7 +11,9 @@
 //|            CScannerRsi7  m_Rsi7Scanner,                         |
 //|            CScannerBb10  m_Bb10Scanner)                         |
 //|   - Detection() : un SCHEDULER indépendant par scanner (son TF), |
-//|     l'état des scanners À ÉTAT évolue AVANT les filtres, puis   |
+//|     l'état/la lecture des scanners (RSI7 : UpdateState, BB10 :  |
+//|     EvaluateBar) évolue AVANT les filtres, puis chaque scanner  |
+//|     SÉLECTIONNÉ est appelé via TryXxx()                         |
 //|     chaque scanner SÉLECTIONNÉ est appelé via TryXxx()          |
 //|     (panier : K_EMA50_Trade / K_RSI7_Trade / K_BB10_Trade,      |
 //|      false par défaut — greffé ≠ tradé)                         |
@@ -243,9 +245,10 @@ public:
     //| Flux :                                                   |
     //|   1. Lecture du tick                                     |
     //|   2. Anti-rejeu PAR SCANNER (nouvelle bougie sur SON TF ?) |
-    //|   3. État des scanners À ÉTAT (RSI7) — AVANT les filtres, |
-    //|      horodatage validé seulement APRÈS une mise à jour    |
-    //|      réussie (sinon retry au tick suivant — FIX AUDIT 3)  |
+    //|   3. État/lecture des scanners (RSI7 : UpdateState, BB10 :   |
+    //|      EvaluateBar) — AVANT les filtres, horodatage validé     |
+    //|      seulement APRÈS une mise à jour/lecture RÉUSSIE         |
+    //|      (sinon retry au tick suivant — FIX AUDIT 3 / P1-2)      |
     //|   4. Filtres d'EXÉCUTION (NEWS, heures, jours)          |
     //|   5. Panier : TryXxx() des scanners sélectionnés dont    |
     //|      la bougie est nouvelle — verrou SOLO + GetSignal    |
@@ -304,15 +307,29 @@ public:
         {
             LOG.WARNING(DATAS.GetStrategyName() + "iTime(K_BB10_TF) indisponible", __FUNCTION__);
         }
+        else if (m_LastBb10BarTime == 0)
+        {
+            // ✅ FIX AUDIT BB10 P1-1 : PREMIER CONTACT = ARMEMENT, pas
+            // une opportunité. La bougie clôturée AVANT le lancement
+            // de l'EA n'est jamais évaluée (sinon entrée rétroactive
+            // sur un signal ancien — même défaut que le démarrage
+            // RSI7, corrigé en sémantique « alerte Pine » : l'EA ne
+            // trade que les bougies qu'il a vues se former). La
+            // prochaine nouvelle bougie sera traitée normalement.
+            //---------------------------------------------------------------
+            m_LastBb10BarTime = l_Bb10BarTime;   // référence posée SANS candidature
+        }
         else if (l_Bb10BarTime != m_LastBb10BarTime)
         {
-            // BB10 : SANS ÉTAT (schéma EMA50). La validation immédiate est
-            // sûre : un échec de lecture CopyClose dans GetSignal ne
-            // corrompt aucune mémoire — la bougie est sans signal, comme
-            // une alerte Pine non prise (validé par l'audit RSI7 pour les
-            // scanners sans état).
+            // ✅ FIX AUDIT BB10 P1-2 : CANDIDATURE seulement —
+            // l'horodatage est validé APRÈS une lecture réussie
+            // (EvaluateBar, plus bas, AVANT les filtres). Un échec
+            // CopyClose/iLowest ne consomme PAS la bougie : retry au
+            // tick suivant (jamais perdue, jamais traitée deux fois).
+            // EMA50 garde son schéma d'origine (validation immédiate) :
+            // comportement figé par des backtests validés, pas de
+            // modification sans nécessité démontrée (mandat audit).
             //---------------------------------------------------------------
-            m_LastBb10BarTime = l_Bb10BarTime;
             l_NewBb10 = true;
         }
 
@@ -345,10 +362,40 @@ public:
             else
             {
                 l_NewRsi7 = false;                   // retry au tick suivant (même bougie)
-                // NB : BB10/EMA50 (sans état, horodatage déjà validé)
-                // ne sont PAS bloqués par le retry RSI7 — sinon une
-                // panne Copy* du RSI7 avalerait leurs bougies.
+                // NB : EMA50 (validé d'office) et BB10 (candidature en
+                // attente, évalué plus bas) ne sont PAS bloqués par le
+                // retry RSI7 — sinon une panne Copy* du RSI7 avalerait
+                // leurs bougies.
                 if (!l_NewEma50 && !l_NewBb10) return;   // rien d'autre à faire ce tick
+            }
+        }
+
+        // ✅ FIX AUDIT BB10 P1-2 : évaluation de la bougie clôturée
+        // AVANT les filtres (pattern UpdateState RSI7, adapté au
+        // sans-état) :
+        //   - EvaluateBar() lit les données et FIGE la décision de la
+        //     bougie (sens + SL = propriétés immuables de la bougie
+        //     clôturée) ; GetSignal() n'a plus qu'à consommer cette
+        //     décision après les filtres (garde ask/bid du tick)
+        //   - retour FALSE = données indisponibles → bougie NON
+        //     validée → retry au tick suivant (signal préservé)
+        //   - retour TRUE = lecture faite → horodatage validé, que la
+        //     bougie porte un signal ou non. Les filtres d'exécution
+        //     et le verrou SOLO consomment la décision SANS rejouer la
+        //     bougie : un signal filtré = trade manqué (convention
+        //     projet inchangée — pas d'entrée mi-bougie en fin de
+        //     zone NEWS).
+        //------------------------------------------------------------------
+        if (l_NewBb10)
+        {
+            if (m_Bb10Scanner.EvaluateBar())
+            {
+                m_LastBb10BarTime = l_Bb10BarTime;   // validé APRÈS lecture réussie
+            }
+            else
+            {
+                l_NewBb10 = false;                   // retry au tick suivant (même bougie)
+                if (!l_NewEma50 && !l_NewRsi7) return;   // rien d'autre à faire ce tick
             }
         }
 
@@ -560,15 +607,25 @@ void CStrategy::TryRsi7(const MqlTick &i_tick)
 //| Orchestration du scanner BB10 :                                   |
 //|   1. Verrou SOLO (position ouverte → pas de nouvelle entrée,      |
 //|      Pine : "not active" — filtré par LE nom de CE scanner)      |
-//|   2. GetSignal() — réintégration de bande à la clôture ;          |
-//|      SL = extrême N bougies ; TP = 3R ; long (bande basse)        |
-//|      + short optionnel (bande haute, input K_BB10_Short)         |
+//|   2. GetSignal() — consomme la décision figée par EvaluateBar()   |
+//|      (appelé AVANT les filtres dans Detection) ; garde            |
+//|      d'exécution sur le ask/bid du tick courant                   |
 //|   3. Si signal → ExecuteSignal                                     |
 //|                                                                  |
+//| Note prix (✅ doc audit BB10 P2, écart assumé) : le lot (MONEY)   |
+//| et le TP sont fondés sur l'entrée du tick de détection ; Broker   |
+//| relit un tick frais juste avant OrderSend. Dans le TESTEUR les    |
+//| deux lectures voient le MÊME tick (figé pendant l'OnTick) →       |
+//| aucun écart en backtest/parité ; en live l'écart est borné au     |
+//| mouvement d'un tick pendant le calcul de lot (même pile          |
+//| d'appel). Le ré-ancrage du TP sur le fill réel (TRADE_ACTION_SLTP |
+//| post-fill) toucherait le pipeline partagé EMA50/RSI7 →            |
+//| volontairement non fait (mandat : correctifs ciblés).             |
+//|                                                                  |
 //| Note : BB10 = ordres au marché uniquement → pas de verrou         |
-//| pending. Le signal est sans état (réintégration = propriété de la |
-//| bougie) : un échec d'ExecuteSignal ne se rollbacke pas — le trade |
-//| est manqué, comme une alerte Pine non exécutée.                  |
+//| pending. La décision est figée par bougie (sans état glissant) : |
+//| un échec d'ExecuteSignal ne se rollbacke pas — le trade est       |
+//| manqué, comme une alerte Pine non exécutée.                      |
 //+------------------------------------------------------------------+
 void CStrategy::TryBb10(const MqlTick &i_tick)
 {
@@ -600,10 +657,14 @@ void CStrategy::TryBb10(const MqlTick &i_tick)
 //|   2. Un membre + un scheduler m_LastXxxBarTime (init 0 au Config) |
 //|   3. Detection() : détection nouvelle bougie sur K_Xxx_TF ; si    |
 //|      le scanner est À ÉTAT → m_XxxScanner.UpdateState() AVANT les |
-//|      filtres ET valider l'horodatage seulement après un retour     |
-//|      TRUE (échec = retry au tick suivant, jamais de bougie perdue) ;|
-//|      sinon (SANS ÉTAT) validation immédiate (schéma EMA50/BB10) ;  |
-//|      puis if (new_xxx && K_Xxx_Trade) TryXxx(l_Tick);  |
+//|      filtres ; s'il est SANS ÉTAT → m_XxxScanner.EvaluateBar()    |
+//|      AVANT les filtres (fige la décision de la bougie clôturée).  |
+//|      Dans les DEUX cas : armement au 1er contact (m_LastXxxBarTime |
+//|      == 0 → référence sans candidature, aucune entrée rétroactive)|
+//|      ET horodatage validé seulement après un retour TRUE (échec =  |
+//|      retry au tick suivant, jamais de bougie perdue). Seul EMA50   |
+//|      garde la validation immédiate historique (backtests figés) ;  |
+//|      puis if (new_xxx && K_Xxx_Trade) TryXxx(l_Tick);             |
 //|   4. TryXxx : verrous → m_XxxScanner.GetSignal() →               |
 //|      ExecuteSignal()                                              |
 //|   5. m_XxxScanner.RollbackSignal() si le scanner a un état lié à  |
