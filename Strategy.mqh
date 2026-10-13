@@ -9,7 +9,8 @@
 //|   - Détient un ou plusieurs membres scanner EXPLICITES          |
 //|     (ici : CScannerEma50 m_Ema50Scanner,                        |
 //|            CScannerRsi7  m_Rsi7Scanner,                         |
-//|            CScannerBb10  m_Bb10Scanner)                         |
+//|            CScannerBb10  m_Bb10Scanner,                         |
+//|            CScannerOpr   m_OprScanner)                          |
 //|   - Detection() : un SCHEDULER indépendant par scanner (son TF), |
 //|     l'état/la lecture des scanners (RSI7 : UpdateState, BB10 :  |
 //|     EvaluateBar) évolue AVANT les filtres, puis chaque scanner  |
@@ -69,6 +70,7 @@
 #include <Koenigin/Scanner_ema50.mqh>
 #include <Koenigin/Scanner_rsi7.mqh>
 #include <Koenigin/Scanner_bb10.mqh>
+#include <Koenigin/Scanner_opr.mqh>
 // Pour en brancher un autre :
 // #include <Koenigin/Scanner_xxx.mqh>
 
@@ -95,6 +97,8 @@ private:
     CScannerEma50 m_Ema50Scanner;
     CScannerRsi7  m_Rsi7Scanner;
     CScannerBb10  m_Bb10Scanner;
+    CScannerOpr   m_OprScanner;   // OPR : PAS de scheduler de bougie — flux TEMPOREL
+                                  // (fenetre 16:45-18:30 evaluee a chaque tick, heures en dur)
 
     // État interne
     //------------
@@ -117,6 +121,7 @@ private:
     void TryEma50(const MqlTick &i_tick);
     void TryRsi7(const MqlTick &i_tick);
     void TryBb10(const MqlTick &i_tick);
+    void TryOpr(const MqlTick &i_tick);
 
 //==================================
 //--- PUBLIC
@@ -163,6 +168,11 @@ public:
             LOG.ERROR(DATAS.GetStrategyName() + "Initialisation scanner BB10 échouée", __FUNCTION__);
             return(false);
         }
+        if (!m_OprScanner.Config("OprScanner", K_OPR_TF))
+        {
+            LOG.ERROR(DATAS.GetStrategyName() + "Initialisation scanner OPR échouée", __FUNCTION__);
+            return(false);
+        }
 
         // PANIER : annonce une fois le statut de chaque scanner
         // (greffé ≠ tradé — mémorisé dans le journal au démarrage)
@@ -182,6 +192,11 @@ public:
         else
             LOG.INFO(DATAS.GetStrategyName() + "Panier : BB10 SOLO non sélectionné (K_BB10_Trade=false) — DORMANT, aucun trade", __FUNCTION__);
 
+        if (K_OPR_Trade)
+            LOG.INFO(DATAS.GetStrategyName() + "Panier : OPR sélectionné (K_OPR_Trade=true) — trade ACTIF", __FUNCTION__);
+        else
+            LOG.INFO(DATAS.GetStrategyName() + "Panier : OPR non sélectionné (K_OPR_Trade=false) — DORMANT, aucun trade", __FUNCTION__);
+
         m_InitOk = true;
         LOG.INFO(DATAS.GetStrategyName() + "Stratégie (liaison) initialisée avec succès", __FUNCTION__);
         return(true);
@@ -199,6 +214,7 @@ public:
         m_Ema50Scanner.End();
         m_Rsi7Scanner.End();
         m_Bb10Scanner.End();
+        m_OprScanner.End();
 
         // Flush les données
         //-------------------
@@ -333,7 +349,12 @@ public:
             l_NewBb10 = true;
         }
 
-        if (!l_NewEma50 && !l_NewRsi7 && !l_NewBb10) return;  // aucune nouvelle bougie → on attend
+        if (!l_NewEma50 && !l_NewRsi7 && !l_NewBb10 && !K_OPR_Trade) return;  // aucune nouvelle bougie → on attend
+        // ✅ OPR : le flux OPR est TEMPOREL (fenêtre 16:45-18:30 évaluée à
+        // chaque tick, pas à chaque nouvelle bougie) → quand OPR est
+        // sélectionné, on continue vers les filtres même sans nouvelle
+        // bougie des autres scanners. K_OPR_Trade=false → retour comme
+        // avant (non-régression stricte des 3 scanners).
 
         // ✅ FIX ChatGPT #1 : l'état AVANT les filtres.
         // RSI7 = scanner À ÉTAT : la machine à pivots tourne à CHAQUE
@@ -366,7 +387,7 @@ public:
                 // attente, évalué plus bas) ne sont PAS bloqués par le
                 // retry RSI7 — sinon une panne Copy* du RSI7 avalerait
                 // leurs bougies.
-                if (!l_NewEma50 && !l_NewBb10) return;   // rien d'autre à faire ce tick
+                if (!l_NewEma50 && !l_NewBb10 && !K_OPR_Trade) return;   // rien d'autre à faire ce tick
             }
         }
 
@@ -395,7 +416,7 @@ public:
             else
             {
                 l_NewBb10 = false;                   // retry au tick suivant (même bougie)
-                if (!l_NewEma50 && !l_NewRsi7) return;   // rien d'autre à faire ce tick
+                if (!l_NewEma50 && !l_NewRsi7 && !K_OPR_Trade) return;   // rien d'autre à faire ce tick
             }
         }
 
@@ -430,25 +451,37 @@ public:
         if (l_NewEma50 && K_EMA50_Trade) TryEma50(l_Tick);
         if (l_NewRsi7  && K_RSI7_Trade)  TryRsi7(l_Tick);
         if (l_NewBb10  && K_BB10_Trade)  TryBb10(l_Tick);
+        // ✅ OPR : PAS de condition l_NewOpr — le scanner OPR est évalué à
+        // CHAQUE TICK quand il est sélectionné (flux temporel, fidélité au
+        // pseudo code validé : ses fenêtres/verrous internes décident).
+        // Il est appelé ICI, après les filtres maison NEWS/heures/jours
+        // (comme les autres scanners — en zone NEWS, pas de détection).
+        if (K_OPR_Trade) TryOpr(l_Tick);
     }
 
     //+--------------------------------------------------------+
     //| ManagePositions                                         |
     //| Appelée par Koenigin::OnTick() à chaque tick + OnTimer().  |
     //|                                                          |
-    //| EMA50, RSI7 : rien à gérer intra-bar — le bracket SL/TP  |
-    //| est posé avec l'ordre et porté par le broker (fidélité   |
-    //| Pine : pas de BE, pas de trailing). Les Pine sortaient    |
-    //| uniquement aux SL/TP simulés ; ici c'est le broker qui    |
-    //| s'en charge.                                             |
+    //| EMA50, RSI7, BB10 : rien à gérer intra-bar — le bracket    |
+    //| SL/TP est posé avec l'ordre et porté par le broker        |
+    //| (fidélité Pine : pas de BE, pas de trailing).             |
     //|                                                          |
-    //| Recette pour un scanner AVEC management (BE, trailing,  |
-    //| invalidation) : lecture du tick → filtre NEWS →          |
-    //| scanner.OnTick(tick).                                    |
+    //| OPR : scanner AVEC management — la recette est réalisée : |
+    //| lecture du tick (dans le scanner) → filtre NEWS (dans le  |
+    //| scanner : annulation pendings + BE quand même, fidèle     |
+    //| BotOPR) → m_OprScanner.OnTick(). Gère en API brute :       |
+    //| zone NEWS, clôture forcée >= 22:00, cancel filet >= 18:30,|
+    //| BreakEven 0.25R, divergence ST/EMA. Filtré par comment    |
+    //| "OprScanner" — n'importe jamais sur les autres scanners.  |
     //+--------------------------------------------------------+
     void ManagePositions(void)
     {
-        // EMA50, RSI7 : aucun management — voir commentaire ci-dessus.
+        // EMA50, RSI7, BB10 : aucun management — voir commentaire ci-dessus.
+
+        // OPR : management à chaque tick + OnTimer 1 s (marché gelé compris)
+        //----------------------------------------------------------------
+        m_OprScanner.OnTick();
     }
 };
 
@@ -649,6 +682,43 @@ void CStrategy::TryBb10(const MqlTick &i_tick)
     // EXÉCUTION (DATAS + MONEY + BROKER)
     //---------------------------------------
     ExecuteSignal(m_Bb10Scanner.GetNamePublic(), l_Datas);
+}
+
+//+------------------------------------------------------------------+
+//| TryOpr                                                            |
+//| Orchestration du scanner OPR (stratégie d'origine BotOPR_001) :   |
+//|   1. m_OprScanner.TryDetect() — le flux BotOPR complet :          |
+//|      reset journalier + heures en dur, verrou 1 trade/jour        |
+//|      3 couches, lecture range safe_read+retry, filtre ATR,        |
+//|      convergence ST/EMA, divergence-cancel, fenêtre               |
+//|      [16:45, 18:30), STOP vs INSTANT BREAKOUT (slippage)          |
+//|   2. Si signal → ExecuteSignal (sizing MONEY sur Entry PLANNÉ,    |
+//|      SetData, BROKER.SendOrder dispatch IsMarketOrder →          |
+//|      ordre au marché ou BUY-STOP/SELL-STOP)                       |
+//|                                                                  |
+//| Les verrous (journalier, pending, position) et le management     |
+//| (NEWS/22h/18h30/BE/divergence) vivent DANS le scanner             |
+//| (TryDetect / OnTick) : TryOpr est le relais panier, appelé       |
+//| à chaque tick après les filtres maison (flux temporel).          |
+//| Un échec d'ExecuteSignal ne se rollbacke pas : le verrou          |
+//| journalier n'est armé que par l'exécution RÉELLE (deal du        |
+//| jour / franchissement du pending / position ouverte) — le trade  |
+//| est manqué, comme BotOPR.                                        |
+//+------------------------------------------------------------------+
+void CStrategy::TryOpr(const MqlTick &i_tick)
+{
+    // RÉCUPÉRATION DU SIGNAL (flux complet 15 étapes dans le scanner)
+    //------------------------------------------------------------------
+    STRUCT_STRATEGY l_Datas;
+    ZeroMemory(l_Datas);
+    if (!m_OprScanner.TryDetect(i_tick, l_Datas))
+    {
+        return;  // pas de signal (verrou/filtre/fenêtre/échec lecture)
+    }
+
+    // EXÉCUTION (DATAS + MONEY + BROKER — dispatch marché vs stop)
+    //---------------------------------------------------------------
+    ExecuteSignal(m_OprScanner.GetNamePublic(), l_Datas);
 }
 
 //+------------------------------------------------------------------+
