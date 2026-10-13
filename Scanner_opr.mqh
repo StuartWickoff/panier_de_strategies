@@ -142,6 +142,24 @@
 
 //////////////////////////////////////////////////////////
 //                                                      //
+//              É N U M É R É S                         //
+//                                                      //
+//////////////////////////////////////////////////////////
+// Type de Stop Loss (BotOPR : ENUM_SL_TYPE, BB_ADX_expert.mqh)
+// — déclaré AVANT les inputs car K_OPR_SL_Type l'utilise :
+//   en MQL5 un type doit exister avant sa 1re utilisation,
+//   sinon MetaEditor sort "declaration without type" (l.161)
+//   puis en cascade switch illégal (l.352/361) et
+//   EnumOprSlToString (l.890).
+enum ENUM_OPR_SL_TYPE
+{
+    eOprSL_Mid           ,  // Milieu du range
+    eOprSL_LowHigh       ,  // Low/High de la range
+    eOprSL_LowHighBuffer ,  // Low/High + buffer (% de la range)
+};
+
+//////////////////////////////////////////////////////////
+//                                                      //
 //              I N P U T S                             //
 //                                                      //
 //////////////////////////////////////////////////////////
@@ -167,19 +185,6 @@ input double             K_OPR_BE_Buffer_Points    = 2.0;           // Buffer BE
 input double             K_OPR_Offset              = 1.0;           // Offset anti fausse cassure (BRUT en prix, BotOPR : 1.0)
 input double             K_OPR_MaxSlippage         = 5.0;           // Slippage max bascule marché (BotOPR : 5.0)
 input double             K_OPR_MinRange_ATR_Ratio  = 0.5;           // Range min = X x ATR(14) (BotOPR : 0.5)
-
-//////////////////////////////////////////////////////////
-//                                                      //
-//              É N U M É R É S                         //
-//                                                      //
-//////////////////////////////////////////////////////////
-// Type de Stop Loss (BotOPR : ENUM_SL_TYPE, BB_ADX_expert.mqh)
-enum ENUM_OPR_SL_TYPE
-{
-    eOprSL_Mid           ,  // Milieu du range
-    eOprSL_LowHigh       ,  // Low/High de la range
-    eOprSL_LowHighBuffer ,  // Low/High + buffer (% de la range)
-};
 
 //////////////////////////////////////////////////////////
 //                                                      //
@@ -481,12 +486,12 @@ private:
         {
             ulong l_Ticket = OrderGetTicket(i);
 
-            if (OrderGetString (l_Ticket, ORDER_SYMBOL) != Symbol())              continue;
-            if (OrderGetInteger(l_Ticket, ORDER_MAGIC)  != (K_Magic + I_Robot_ID)) continue;
-            if (StringFind(OrderGetString(l_Ticket, ORDER_COMMENT), m_Name) < 0)   continue;
+            if (OrderGetString (ORDER_SYMBOL) != Symbol())              continue;
+            if (OrderGetInteger(ORDER_MAGIC)  != (K_Magic + I_Robot_ID)) continue;
+            if (StringFind(OrderGetString(ORDER_COMMENT), m_Name) < 0)   continue;
 
-            double l_Entry = OrderGetDouble (l_Ticket, ORDER_PRICE_OPEN);
-            long   l_Type  = OrderGetInteger(l_Ticket, ORDER_TYPE);
+            double l_Entry = OrderGetDouble (ORDER_PRICE_OPEN);
+            long   l_Type  = OrderGetInteger(ORDER_TYPE);
 
             if (l_Type == ORDER_TYPE_BUY_STOP  && i_tick.ask >= l_Entry)
             {
@@ -508,9 +513,9 @@ private:
         {
             ulong l_Ticket = PositionGetTicket(i);
 
-            if (PositionGetString (l_Ticket, POSITION_SYMBOL) != Symbol())              continue;
-            if (PositionGetInteger(l_Ticket, POSITION_MAGIC)  != (K_Magic + I_Robot_ID)) continue;
-            if (StringFind(PositionGetString(l_Ticket, POSITION_COMMENT), m_Name) < 0)  continue;
+            if (PositionGetString (POSITION_SYMBOL) != Symbol())              continue;
+            if (PositionGetInteger(POSITION_MAGIC)  != (K_Magic + I_Robot_ID)) continue;
+            if (StringFind(PositionGetString(POSITION_COMMENT), m_Name) < 0)  continue;
 
             LOG.INFO(m_Name + " : Position détectée (ouverte actuellement)", __FUNCTION__);
             m_PositionOpened = true;
@@ -531,9 +536,9 @@ private:
         {
             ulong l_Ticket = OrderGetTicket(i);
 
-            if (OrderGetString (l_Ticket, ORDER_SYMBOL) != Symbol())              continue;
-            if (OrderGetInteger(l_Ticket, ORDER_MAGIC)  != (K_Magic + I_Robot_ID)) continue;
-            if (StringFind(OrderGetString(l_Ticket, ORDER_COMMENT), m_Name) < 0)   continue;
+            if (OrderGetString (ORDER_SYMBOL) != Symbol())              continue;
+            if (OrderGetInteger(ORDER_MAGIC)  != (K_Magic + I_Robot_ID)) continue;
+            if (StringFind(OrderGetString(ORDER_COMMENT), m_Name) < 0)   continue;
 
             return(true);
         }
@@ -554,9 +559,9 @@ private:
         {
             ulong l_Ticket = OrderGetTicket(i);
 
-            if (OrderGetString (l_Ticket, ORDER_SYMBOL) != Symbol())              continue;
-            if (OrderGetInteger(l_Ticket, ORDER_MAGIC)  != (K_Magic + I_Robot_ID)) continue;
-            if (StringFind(OrderGetString(l_Ticket, ORDER_COMMENT), m_Name) < 0)   continue;
+            if (OrderGetString (ORDER_SYMBOL) != Symbol())              continue;
+            if (OrderGetInteger(ORDER_MAGIC)  != (K_Magic + I_Robot_ID)) continue;
+            if (StringFind(OrderGetString(ORDER_COMMENT), m_Name) < 0)   continue;
 
             MqlTradeRequest l_Request;
             MqlTradeResult  l_Result;
@@ -601,11 +606,11 @@ private:
         {
             ulong l_Ticket = PositionGetTicket(i);
 
-            if (PositionGetString (l_Ticket, POSITION_SYMBOL) != Symbol())              continue;
-            if (PositionGetInteger(l_Ticket, POSITION_MAGIC)  != (K_Magic + I_Robot_ID)) continue;
-            if (StringFind(PositionGetString(l_Ticket, POSITION_COMMENT), m_Name) < 0)  continue;
+            if (PositionGetString (POSITION_SYMBOL) != Symbol())              continue;
+            if (PositionGetInteger(POSITION_MAGIC)  != (K_Magic + I_Robot_ID)) continue;
+            if (StringFind(PositionGetString(POSITION_COMMENT), m_Name) < 0)  continue;
 
-            long l_Type = PositionGetInteger(l_Ticket, POSITION_TYPE);
+            long l_Type = PositionGetInteger(POSITION_TYPE);
 
             // Race : la position peut s'être fermée (TP/SL) entre-temps
             //--------------------------------------------------------------
@@ -624,7 +629,7 @@ private:
             l_Request.action    = TRADE_ACTION_DEAL;
             l_Request.position  = l_Ticket;
             l_Request.symbol    = Symbol();
-            l_Request.volume    = PositionGetDouble(l_Ticket, POSITION_VOLUME);
+            l_Request.volume    = PositionGetDouble(POSITION_VOLUME);
             l_Request.type      = (l_Type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
             l_Request.price     = (l_Type == POSITION_TYPE_BUY) ? SymbolInfoDouble(Symbol(), SYMBOL_BID)
                                                                 : SymbolInfoDouble(Symbol(), SYMBOL_ASK);
@@ -673,16 +678,16 @@ private:
         {
             ulong  l_Ticket = PositionGetTicket(i);
 
-            if (PositionGetString (l_Ticket, POSITION_SYMBOL) != Symbol())              continue;
-            if (PositionGetInteger(l_Ticket, POSITION_MAGIC)  != (K_Magic + I_Robot_ID)) continue;
-            if (StringFind(PositionGetString(l_Ticket, POSITION_COMMENT), m_Name) < 0)  continue;
+            if (PositionGetString (POSITION_SYMBOL) != Symbol())              continue;
+            if (PositionGetInteger(POSITION_MAGIC)  != (K_Magic + I_Robot_ID)) continue;
+            if (StringFind(PositionGetString(POSITION_COMMENT), m_Name) < 0)  continue;
 
-            double l_OpenPrice    = PositionGetDouble (l_Ticket, POSITION_PRICE_OPEN);
-            double l_CurrentSL    = PositionGetDouble (l_Ticket, POSITION_SL);
-            double l_CurrentTP    = PositionGetDouble (l_Ticket, POSITION_TP);
-            double l_CurrentPrice = PositionGetDouble (l_Ticket, POSITION_PRICE_CURRENT);
-            long   l_Type         = PositionGetInteger(l_Ticket, POSITION_TYPE);
-            ulong  l_Magic        = PositionGetInteger(l_Ticket, POSITION_MAGIC);
+            double l_OpenPrice    = PositionGetDouble (POSITION_PRICE_OPEN);
+            double l_CurrentSL    = PositionGetDouble (POSITION_SL);
+            double l_CurrentTP    = PositionGetDouble (POSITION_TP);
+            double l_CurrentPrice = PositionGetDouble (POSITION_PRICE_CURRENT);
+            long   l_Type         = PositionGetInteger(POSITION_TYPE);
+            ulong  l_Magic        = (ulong)PositionGetInteger(POSITION_MAGIC);
             int    l_Digits       = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
 
             // Garde anti-BE-infini : SL déjà au-delà de l'entrée
@@ -917,9 +922,9 @@ public:
         {
             ulong l_Ticket = PositionGetTicket(i);
 
-            if (PositionGetString (l_Ticket, POSITION_SYMBOL) != Symbol())              continue;
-            if (PositionGetInteger(l_Ticket, POSITION_MAGIC)  != (K_Magic + I_Robot_ID)) continue;
-            if (StringFind(PositionGetString(l_Ticket, POSITION_COMMENT), m_Name) < 0)  continue;
+            if (PositionGetString (POSITION_SYMBOL) != Symbol())              continue;
+            if (PositionGetInteger(POSITION_MAGIC)  != (K_Magic + I_Robot_ID)) continue;
+            if (StringFind(PositionGetString(POSITION_COMMENT), m_Name) < 0)  continue;
 
             return(true);
         }
