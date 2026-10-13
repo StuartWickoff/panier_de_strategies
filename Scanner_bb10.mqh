@@ -152,6 +152,7 @@
 // (portés par le broker — jamais touchées par le toggle).
 // False par défaut : rien ne trade tant que l'utilisateur n'a
 // rien choisi dans le panier.
+input group              "📁 STRATÉGIE BB10 NASDAQ"
 input bool               K_BB10_Trade   = false;       // Panier : trader BB10 SOLO ?
 input ENUM_TIMEFRAMES    K_BB10_TF      = PERIOD_H1;   // TF de travail (Pine : TF Valide = H1)
 input uint               K_BB10_Period  = 10;          // Période Bollinger (Pine : 10)

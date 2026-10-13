@@ -80,6 +80,7 @@
 // (portés par le broker — jamais touchées par le toggle).
 // False par défaut : rien ne trade tant que l'utilisateur n'a
 // rien choisi dans le panier.
+input group              "📁 STRATÉGIE EMA50 NASDAQ"
 input bool               K_EMA50_Trade   = false;       // Panier : trader EMA50 SOLO ?
 input ENUM_TIMEFRAMES    K_EMA50_TF      = PERIOD_H1;   // TF de travail (Pine : TF Valide = H1)
 input uint               K_EMA50_Period  = 50;          // Période EMA (Pine : 50)

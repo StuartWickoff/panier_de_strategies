@@ -140,6 +140,7 @@
 // leur SL/TP (portés par le broker — jamais touchées par le toggle).
 // False par défaut : rien ne trade tant que l'utilisateur n'a
 // rien choisi dans le panier.
+input group              "📁 STRATÉGIE RSI7 OR"
 input bool               K_RSI7_Trade   = false;       // Panier : trader RSI7 SOLO ?
 input ENUM_TIMEFRAMES    K_RSI7_TF      = PERIOD_H1;   // TF de travail (Pine : TF Valide = H1, OR)
 input uint               K_RSI7_Period  = 7;           // Période RSI (Pine : 7)
