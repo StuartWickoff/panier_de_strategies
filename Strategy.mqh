@@ -71,7 +71,6 @@
 #include <Koenigin/Scanner_rsi7.mqh>
 #include <Koenigin/Scanner_bb10.mqh>
 #include <Koenigin/Scanner_opr.mqh>
-#include <Koenigin/MarketRegime.mqh>
 // Pour en brancher un autre :
 // #include <Koenigin/Scanner_xxx.mqh>
 
@@ -100,7 +99,6 @@ private:
     CScannerBb10  m_Bb10Scanner;
     CScannerOpr   m_OprScanner;   // OPR : PAS de scheduler de bougie — flux TEMPOREL
                                   // (fenetre 16:45-18:30 evaluee a chaque tick, heures en dur)
-    CMarketRegime m_MarketRegime;
 
     // État interne
     //------------
@@ -149,11 +147,6 @@ public:
         // 1. Configure les données partagées
         //-------------------------------------
         if (!DATAS.Config(i_strategy_name, i_period, i_folder)) return(false);
-        if (!m_MarketRegime.Config())
-        {
-            LOG.ERROR(DATAS.GetStrategyName() + "Initialisation du filtre de régime H4 échouée", __FUNCTION__);
-            return(false);
-        }
 
         // 2. Configure chaque scanner enregistré
         //-----------------------------------------
@@ -222,7 +215,6 @@ public:
         m_Rsi7Scanner.End();
         m_Bb10Scanner.End();
         m_OprScanner.End();
-        m_MarketRegime.End();
 
         // Flush les données
         //-------------------
@@ -287,11 +279,6 @@ public:
             LOG.WARNING(DATAS.GetStrategyName() + "Lecture du tick impossible", __FUNCTION__);
             return;
         }
-
-        // Le régime est calculé sur la dernière bougie H4 clôturée.
-        // En cas de données indisponibles, le module reste en Unknown
-        // et bloque les nouvelles entrées de ces scanners.
-        m_MarketRegime.Update();
 
         // ✅ FIX ChatGPT #2 : anti-rejeu basé sur le TF DE CHAQUE SCANNER
         //-----------------------------------------------------------------------
@@ -462,8 +449,8 @@ public:
         // propriété de la bougie : il ne se rejoue pas (Pine-fidèle).
         //---------------------------------------------------------------
         if (l_NewEma50 && K_EMA50_Trade) TryEma50(l_Tick);
-        if (l_NewRsi7 && K_RSI7_Trade && m_MarketRegime.AllowsRangeStrategy(eRRS_Rsi7)) TryRsi7(l_Tick);
-        if (l_NewBb10 && K_BB10_Trade && m_MarketRegime.AllowsRangeStrategy(eRRS_Bb10)) TryBb10(l_Tick);
+        if (l_NewRsi7  && K_RSI7_Trade)  TryRsi7(l_Tick);
+        if (l_NewBb10  && K_BB10_Trade)  TryBb10(l_Tick);
         // ✅ OPR : PAS de condition l_NewOpr — le scanner OPR est évalué à
         // CHAQUE TICK quand il est sélectionné (flux temporel, fidélité au
         // pseudo code validé : ses fenêtres/verrous internes décident).
@@ -599,19 +586,6 @@ void CStrategy::TryEma50(const MqlTick &i_tick)
     if (!m_Ema50Scanner.GetSignal(i_tick, l_Datas))
     {
         return;  // pas de signal
-    }
-
-    // VETO DE RÉGIME H4 (MarketRegime) : Bull -> EMA50 long seulement,
-    // Bear -> short seulement, Range/Inconnu -> aucun. Le signal est un
-    // événement rare : on journalise chaque veto (diagnostic backtest).
-    // Signal vetoé = trade manqué, propriété de la bougie (pas de rejeu).
-    //-------------------------------------------------------------------
-    if (!m_MarketRegime.AllowsEmaSignal(l_Datas.Trend))
-    {
-        LOG.INFO(m_Ema50Scanner.GetNamePublic() + " : signal " + TrendToString(l_Datas.Trend) +
-                 " vetoé par le régime H4 [" + MarketRegimeToString(m_MarketRegime.GetRegime()) +
-                 "] — trade manqué, propriété de la bougie", __FUNCTION__);
-        return;
     }
 
     // EXÉCUTION (DATAS + MONEY + BROKER)
