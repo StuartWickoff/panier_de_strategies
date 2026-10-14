@@ -69,7 +69,8 @@
 //|   dimensionner les quantités de la simulation.                    |
 //| - Portes de dates TV (startDate/limitEnd/endDate) et strictChart  |
 //|   → non reproduites : artefacts de la simulation TradingView.     |
-//|   Garde symbole = I_Symbol_Name au niveau EA, TF = K_BB10_TF.     |
+//|   Symbole = celui du chart/testeur (Symbol(), automatique),       |
+//|   TF = K_BB10_TF.                                                  |
 //|                                                                  |
 //| === AUDIT BB10 (revue externe) — 2 correctifs + 1 documentation ===|
 //|                                                                  |

@@ -81,7 +81,6 @@ input bool                I_Notif_Alert          = true;          // Alerte noti
 input ENUM_LOG_LEVEL      I_Log_Level            = eL_All;        // Niveau des logs
 input ENUM_VISU           I_Visu_Height          = eV_Nothing;    // Taille affichage états
 input uint                I_Deviation            = 10;            // Slippage autorisé
-input string              I_Symbol_Name          = "US100m";      // Symbole exact dans MT5 (guard dans OnInit)
 input double              K_Max_Risk_Auth        = 2.5;           // Risque max autorisé pour fallback MinLot (%)
 
 //////////////////////////////////////////////////////////
@@ -176,23 +175,34 @@ int OnInit(void)
    //----------------
    bool l_CorrectInit;
 
-   // ✅ FIX #11 : Guard I_Symbol_Name
-   // L'input I_Symbol_Name n'était que décoratif. Maintenant on
-   // vérifie que le symbole du chart correspond exactement, sinon
-   // on refuse de démarrer (évite les erreurs de config silencieuses).
+   // ✅ FIX #11 (RÉVISÉ — multi-symboles) : symbole lu automatiquement
+   // L'input I_Symbol_Name et son guard ont été retirés : ils bloquaient
+   // les optimisations multi-symboles (chaque passe sur un nouveau
+   // symbole échouait au guard → INIT_FAILED → backtest stoppé, et il
+   // fallait modifier l'input à la main à chaque fois).
+   // Le symbole est maintenant lu via Symbol(), équivalent exact de la
+   // variable prédéfinie _Symbol = nom du symbole du chart courant
+   // (doc officielle mql5.com/en/docs/predefined/_symbol). Dans le
+   // testeur, le "chart courant" est le symbole de la passe en cours
+   // → chaque passe d'optimisation récupère automatiquement le bon
+   // symbole. Tout le code (scanners, broker, management) utilise
+   // déjà Symbol() : l'EA trade TOUJOURS le symbole du chart/testeur.
+   // Compromis assumé : plus de garde contre un attach sur le mauvais
+   // chart en live → le symbole est journalisé ICI (Experts) et dans
+   // le fichier de log (après LOG.Config) pour traçabilité complète.
    //----------------------------------------------------------------
-   if (Symbol() != I_Symbol_Name)
-   {
-      Print("ERREUR : Symbole du chart ('", Symbol(), "') != I_Symbol_Name ('", I_Symbol_Name, "')");
-      Alert("Koenigin : symbole du chart (" + Symbol() + ") != I_Symbol_Name (" + I_Symbol_Name + ")");
-      return(INIT_FAILED);
-   }
+   Print("Koenigin : symbole tradé = ", Symbol(), " (lu automatiquement du chart/testeur)");
 
    // Initialise le système de log
    //-----------------------------
    l_CorrectInit = LOG.Config(K_Repertory);
    LOG.SetLevel(I_Log_Level);
-   
+
+   // Journalise le symbole dans le fichier de log (traçabilité
+   // multi-symboles — cf. FIX #11 révisé ci-dessus)
+   //--------------------------------------------------------------
+   LOG.INFO("Symbole tradé = " + Symbol() + " (lu automatiquement du chart/testeur)", __FUNCTION__);
+
    // Initialise le système d'alerte
    //-------------------------------
    ALERT.Config(K_SoftName, K_AlertSoundName);
