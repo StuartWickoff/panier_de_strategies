@@ -601,8 +601,16 @@ void CStrategy::TryEma50(const MqlTick &i_tick)
         return;  // pas de signal
     }
 
+    // VETO DE RÉGIME H4 (MarketRegime) : Bull -> EMA50 long seulement,
+    // Bear -> short seulement, Range/Inconnu -> aucun. Le signal est un
+    // événement rare : on journalise chaque veto (diagnostic backtest).
+    // Signal vetoé = trade manqué, propriété de la bougie (pas de rejeu).
+    //-------------------------------------------------------------------
     if (!m_MarketRegime.AllowsEmaSignal(l_Datas.Trend))
     {
+        LOG.INFO(m_Ema50Scanner.GetNamePublic() + " : signal " + TrendToString(l_Datas.Trend) +
+                 " vetoé par le régime H4 [" + MarketRegimeToString(m_MarketRegime.GetRegime()) +
+                 "] — trade manqué, propriété de la bougie", __FUNCTION__);
         return;
     }
 

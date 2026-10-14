@@ -546,6 +546,37 @@ private:
     }
 
     //+--------------------------------------------------------+
+    //| HasStalePosition                                        |
+    //|--------------------------------------------------------|
+    //| FILET anti-jour-sauté : position OPR ouverte AVANT le    |
+    //| 16:30 du jour courant (= forcément d'un jour précédent —|
+    //| les entrées OPR sont toutes >= 16:45).                   |
+    //| Cas nominal : JAMAIS vrai (close forcé a 22:00). Devient |
+    //| vrai si un trou de ticks FRANCHIT MINUIT : DailyRefresh  |
+    //| a alors déjà passé m_Close au jour suivant et le close   |
+    //| forcé de la veille est perdu pour toujours. Rattrapage   |
+    //| ici (vu 3 fois / 790 trades au backtest qualité 84 % ;   |
+    //| en live : marché gelé un soir entier ou redémarrage      |
+    //| nocturne de l'EA). Attrape AUSSI un pending de la veille |
+    //| rempli hors fenêtre pendant le trou (POSITION_TIME du    |
+    //| jour < 16:30 = illégitime).                              |
+    //+--------------------------------------------------------+
+    bool HasStalePosition(void)
+    {
+        for (int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+            ulong l_Ticket = PositionGetTicket(i);
+
+            if (PositionGetString (POSITION_SYMBOL) != Symbol())              continue;
+            if (PositionGetInteger(POSITION_MAGIC)  != (K_Magic + I_Robot_ID)) continue;
+            if (StringFind(PositionGetString(POSITION_COMMENT), m_Name) < 0)  continue;
+
+            if (PositionGetInteger(POSITION_TIME) < m_Start) return(true);
+        }
+        return(false);
+    }
+
+    //+--------------------------------------------------------+
     //| CancelPendingOrders                                     |
     //|--------------------------------------------------------|
     //| Annulation des pendings OPR en API BRUTE (règle maison : |
@@ -1164,6 +1195,19 @@ public:
         // (2) Heures du jour
         //---------------------
         DailyRefresh();
+
+        // (2bis) FILET anti-jour-sauté (trou de ticks franchissant
+        // minuit : le close forcé de la veille a été sauté, et une
+        // position OPR ne doit JAMAIS survivre au changement de
+        // jour). Priorité absolue, avant la zone NEWS.
+        //------------------------------------------------------------
+        if (HasStalePosition())
+        {
+            LOG.WARNING(m_Name + " : Position d'un jour précédent détectée (trou de ticks ?) — fermeture immédiate", __FUNCTION__);
+            ForceClosePositions();
+            CancelPendingOrders();
+            return;
+        }
 
         // (3) Zone NEWS : priorité absolue
         //------------------------------------
