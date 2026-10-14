@@ -1,0 +1,97 @@
+//@version=6
+indicator("SCANNER NASDAQ EMA50 | SOLO | SL10 | TP2R", overlay=true, max_boxes_count=500)
+
+// PLAN VISUEL : aucun input ci-dessous ne modifie les signaux.
+planShow = input.bool(true,"Afficher plan et checklist",group="Plan de trading")
+planMode = input.string("Automatique","Cases",options=["Automatique","Manuel (aide-memoire)"],group="Plan de trading")
+planPosition = input.string("Bas gauche","Emplacement",options=["Bas gauche","Bas droite","Haut gauche","Haut droite"],group="Plan de trading")
+planText = input.color(color.black,"Texte",group="Plan de trading")
+planBg = input.color(color.new(color.white,10),"Fond",group="Plan de trading")
+planSize = input.string("Petit","Taille",options=["Petit","Normal"],group="Plan de trading")
+planManual0 = input.bool(false,"Bougie precedente sous / sur EMA50",group="Checklist manuelle - affichage seulement")
+planManual1 = input.bool(false,"Cloture au-dessus EMA50",group="Checklist manuelle - affichage seulement")
+var array<bool> planChecks = array.new<bool>(2,false)
+var int planTime = na
+// Scanner du graphique courant. Aucun ordre reel ni backtest strategy().
+// Sorties simulees sur OHLC : si SL et TP touches, extremum le plus proche
+// de l'ouverture traite en premier (egalite : SL). Pas de precision tick.
+keep = input.int(200, "Positions avec boxes conservees", minval=1, maxval=240)
+ema = ta.ema(close, 50)
+stopCandidate = ta.lowest(low, 10)
+crossUp = close > ema and close[1] <= ema[1]
+validTF = timeframe.isintraday and timeframe.in_seconds() == 3600
+plot(ema, "EMA 50", color=color.blue, linewidth=2)
+
+var bool active = false
+var float entry = na
+var float sl = na
+var float tp = na
+var box profitBox = na
+var box riskBox = na
+var array<box> history = array.new<box>()
+bool buySignal = false
+bool stopSignal = false
+bool targetSignal = false
+
+if barstate.isconfirmed
+    // Gerer la position precedente avant d'evaluer un nouveau signal.
+    // Une entree a la cloture ne peut pas sortir dans la meme bougie.
+    if active
+        box.set_right(profitBox, time_close)
+        box.set_right(riskBox, time_close)
+        bool gapSL = open <= sl
+        bool gapTP = open >= tp
+        bool hitSL = low <= sl
+        bool hitTP = high >= tp
+        if gapSL or gapTP or hitSL or hitTP
+            bool exitAtSL = gapSL ? true : gapTP ? false : hitSL and hitTP ? open - low <= high - open : hitSL
+            stopSignal := exitAtSL
+            targetSignal := not exitAtSL
+            int exitTime = gapSL or gapTP ? time : time_close
+            box.set_right(profitBox, exitTime)
+            box.set_right(riskBox, exitTime)
+            active := false
+            profitBox := na
+            riskBox := na
+    planTime := time_close
+    array.set(planChecks,0,close[1]<=ema[1])
+    array.set(planChecks,1,close>ema)
+    if validTF and not active and bar_index >= 200 and crossUp and close - stopCandidate > syminfo.mintick
+        entry := close
+        sl := stopCandidate
+        tp := entry + 2.0 * (entry - sl)
+        active := true
+        buySignal := true
+        profitBox := box.new(time_close, tp, time_close, entry, xloc=xloc.bar_time, border_color=color.green, bgcolor=color.new(color.green,82), text="TP 2R", text_color=color.green, text_size=size.tiny)
+        riskBox := box.new(time_close, entry, time_close, sl, xloc=xloc.bar_time, border_color=color.red, bgcolor=color.new(color.red,85), text="SL", text_color=color.red, text_size=size.tiny)
+        array.push(history, profitBox)
+        array.push(history, riskBox)
+        while array.size(history) > keep * 2
+            box.delete(array.shift(history))
+        alert("ACHAT EMA50 SOLO | " + syminfo.tickerid + " | H1 | Entree " + str.tostring(entry,format.mintick) + " | SL " + str.tostring(sl,format.mintick) + " | TP " + str.tostring(tp,format.mintick), alert.freq_once_per_bar_close)
+
+plotshape(buySignal, title="Signal achat", style=shape.labelup, location=location.belowbar, color=color.green, text="ACHAT", textcolor=color.white, size=size.tiny)
+plotshape(stopSignal, title="SL simule", style=shape.labeldown, location=location.abovebar, color=color.red, text="SL", textcolor=color.white, size=size.tiny)
+plotshape(targetSignal, title="TP simule", style=shape.labeldown, location=location.abovebar, color=color.green, text="TP", textcolor=color.white, size=size.tiny)
+alertcondition(buySignal, "Achat EMA50 SOLO", "Signal ACHAT EMA50 SOLO sur {{ticker}} H1. Voir les niveaux sur le graphique.")
+alertcondition(stopSignal, "SL touche (simulation)", "SL simule touche sur {{ticker}}.")
+alertcondition(targetSignal, "TP touche (simulation)", "TP simule touche sur {{ticker}}.")
+
+
+// Checklist photographiee AVANT entree pour ne pas decocher "position libre" au signal.
+planLoc = planPosition=="Bas gauche" ? position.bottom_left : planPosition=="Bas droite" ? position.bottom_right : planPosition=="Haut gauche" ? position.top_left : position.top_right
+planFont = planSize=="Petit" ? size.small : size.normal
+var table planTable = table.new(planLoc,2,3,bgcolor=planBg,border_width=0,force_overlay=true)
+if barstate.isfirst
+    table.merge_cells(planTable,0,0,1,0)
+if barstate.islast
+    if not planShow
+        table.clear(planTable,0,0,1,2)
+    else
+        table.cell(planTable,0,0,"NASDAQ — EMA50",text_color=planText,text_size=planFont,bgcolor=planBg)
+        planOK0 = planMode=="Automatique" ? array.get(planChecks,0) : planManual0
+        table.cell(planTable,0,1,planOK0 ? "✓" : "☐",text_color=planOK0 ? color.green : color.gray,text_size=planFont,bgcolor=planBg)
+        table.cell(planTable,1,1,"Bougie precedente sous / sur EMA50",text_color=planText,text_halign=text.align_left,text_size=planFont,bgcolor=planBg)
+        planOK1 = planMode=="Automatique" ? array.get(planChecks,1) : planManual1
+        table.cell(planTable,0,2,planOK1 ? "✓" : "☐",text_color=planOK1 ? color.green : color.gray,text_size=planFont,bgcolor=planBg)
+        table.cell(planTable,1,2,"Cloture au-dessus EMA50",text_color=planText,text_halign=text.align_left,text_size=planFont,bgcolor=planBg)

@@ -1,0 +1,112 @@
+//@version=6
+indicator("SCANNER BB10 | NASDAQ H1 | SOLO | SL5 TP3R", overlay=true, max_boxes_count=500, max_labels_count=500)
+
+// PLAN VISUEL : aucun input ci-dessous ne modifie les signaux.
+planShow = input.bool(true,"Afficher plan et checklist",group="Plan de trading")
+planMode = input.string("Automatique","Cases",options=["Automatique","Manuel (aide-memoire)"],group="Plan de trading")
+planPosition = input.string("Bas gauche","Emplacement",options=["Bas gauche","Bas droite","Haut gauche","Haut droite"],group="Plan de trading")
+planText = input.color(color.black,"Texte",group="Plan de trading")
+planBg = input.color(color.new(color.white,10),"Fond",group="Plan de trading")
+planSize = input.string("Petit","Taille",options=["Petit","Normal"],group="Plan de trading")
+planManual0 = input.bool(false,"Bougie precedente sous / sur bande basse",group="Checklist manuelle - affichage seulement")
+planManual1 = input.bool(false,"Cloture au-dessus bande basse",group="Checklist manuelle - affichage seulement")
+var array<bool> planChecks = array.new<bool>(2,false)
+var int planTime = na
+// BB_01677 : achats uniquement. Simulation OHLC, pas ordres reels.
+// Sorties confirmees a la cloture; aucune sortie sur la bougie d'entree.
+startDate = input.time(timestamp("01 Apr 2021 00:00 +0000"), "Debut des signaux")
+limitEnd = input.bool(false, "Limiter a la periode du backtest")
+endDate = input.time(timestamp("26 Sep 2026 00:00 +0000"), "Fin exclusive du backtest")
+keep = input.int(200, "Positions conservees avec boxes", minval=1, maxval=240)
+strictChart = input.bool(true, "Signaux uniquement sur OANDA:NAS100USD H1")
+mid = ta.sma(close,10)
+sd = ta.stdev(close,10)
+lower = mid-2.0*sd
+plot(lower,"Bande basse BB10 / 2 sigma",color=color.orange,linewidth=2)
+chartOK = syminfo.tickerid=="OANDA:NAS100USD" and timeframe.isminutes and timeframe.multiplier==60
+signal = sd>0 and close[1]<=lower[1] and close>lower
+stopCandidate = ta.lowest(low,5)
+var bool active = false
+var float entry = na
+var float sl = na
+var float tp = na
+var int entryBar = na
+var box green = na
+var box red = na
+var array<box> boxes = array.new<box>()
+var array<label> labels = array.new<label>()
+// Reprise du filtre de quantite de la strategie, capital virtuel et frais 0,01%/cote.
+var float capital = 100000.0
+var float quantity = na
+bool buy = false
+bool take = false
+bool stopped = false
+if barstate.isconfirmed
+    if active and bar_index>entryBar
+        box.set_right(green,bar_index)
+        box.set_right(red,bar_index)
+        hitSL = low<=sl
+        hitTP = high>=tp
+        if hitSL or hitTP
+            // Gaps prioritaires. Si SL et TP touches, approximation du trajet OHLC
+            // standard selon l'extremum le plus proche de l'ouverture (egalite: SL).
+            stopped := open<=sl ? true : open>=tp ? false : hitSL and hitTP ? math.abs(open-low)<=math.abs(high-open) : hitSL
+            take := not stopped
+            exitPrice = stopped ? (open<=sl ? open : sl) : (open>=tp ? open : tp)
+            capital += quantity*syminfo.pointvalue*(exitPrice-entry)-quantity*syminfo.pointvalue*exitPrice*0.0001
+            array.push(labels,label.new(bar_index,exitPrice,stopped ? "SL" : "TP",style=label.style_label_down,color=stopped ? color.red : color.green,textcolor=color.white,size=size.tiny))
+            active := false
+    distance = close-stopCandidate
+    eligible = (not strictChart or chartOK) and bar_index>=200 and time>=startDate and (not limitEnd or time<endDate)
+    planTime := time_close
+    array.set(planChecks,0,close[1]<=lower[1])
+    array.set(planChecks,1,close>lower)
+    if not active and eligible and signal and distance>syminfo.mintick and capital>0
+        q = math.floor(math.min(capital*0.01/distance,capital/(close*1.0002+distance*3))/syminfo.pointvalue*100)/100
+        if q>0
+            entry := close
+            sl := stopCandidate
+            tp := close+3*distance
+            quantity := q
+            capital -= q*syminfo.pointvalue*entry*0.0001
+            entryBar := bar_index
+            active := true
+            buy := true
+            green := box.new(bar_index,tp,bar_index,entry,bgcolor=color.new(color.green,82),border_color=color.green,text="TP 3R",text_color=color.green)
+            red := box.new(bar_index,entry,bar_index,sl,bgcolor=color.new(color.red,85),border_color=color.red,text="SL",text_color=color.red)
+            array.push(boxes,green)
+            array.push(boxes,red)
+            array.push(labels,label.new(bar_index,entry,"ACHAT",style=label.style_label_up,color=color.green,textcolor=color.white,size=size.small))
+    while array.size(boxes)>keep*2
+        box.delete(array.shift(boxes))
+    while array.size(labels)>keep*2
+        label.delete(array.shift(labels))
+// Marqueurs pour tous les signaux dans l'historique charge, meme apres nettoyage des boxes.
+plotshape(buy,title="Historique achats",style=shape.triangleup,location=location.belowbar,color=color.green,size=size.tiny)
+plotshape(take,title="Historique TP",style=shape.circle,location=location.abovebar,color=color.green,size=size.tiny)
+plotshape(stopped,title="Historique SL",style=shape.xcross,location=location.belowbar,color=color.red,size=size.tiny)
+// Niveaux de position visibles uniquement dans la fenetre de donnees et les alertes.
+plot(active or buy ? entry : na,"Entree",display=display.data_window)
+plot(active or buy ? sl : na,"Stop",display=display.data_window)
+plot(active or buy ? tp : na,"Objectif",display=display.data_window)
+alertcondition(buy,"ACHAT BB10",'ACHAT BB10 SOLO | {{ticker}} {{interval}} | Entree {{plot("Entree")}} | SL {{plot("Stop")}} | TP {{plot("Objectif")}}')
+alertcondition(take,"TP atteint","TP atteint : simulation BB10 SOLO | {{ticker}} {{interval}}")
+alertcondition(stopped,"SL atteint","SL atteint : simulation BB10 SOLO | {{ticker}} {{interval}}")
+
+// Checklist photographiee AVANT entree pour ne pas decocher "position libre" au signal.
+planLoc = planPosition=="Bas gauche" ? position.bottom_left : planPosition=="Bas droite" ? position.bottom_right : planPosition=="Haut gauche" ? position.top_left : position.top_right
+planFont = planSize=="Petit" ? size.small : size.normal
+var table planTable = table.new(planLoc,2,3,bgcolor=planBg,border_width=0,force_overlay=true)
+if barstate.isfirst
+    table.merge_cells(planTable,0,0,1,0)
+if barstate.islast
+    if not planShow
+        table.clear(planTable,0,0,1,2)
+    else
+        table.cell(planTable,0,0,"NASDAQ — BOLLINGER REINTEGRATION",text_color=planText,text_size=planFont,bgcolor=planBg)
+        planOK0 = planMode=="Automatique" ? array.get(planChecks,0) : planManual0
+        table.cell(planTable,0,1,planOK0 ? "✓" : "☐",text_color=planOK0 ? color.green : color.gray,text_size=planFont,bgcolor=planBg)
+        table.cell(planTable,1,1,"Bougie precedente sous / sur bande basse",text_color=planText,text_halign=text.align_left,text_size=planFont,bgcolor=planBg)
+        planOK1 = planMode=="Automatique" ? array.get(planChecks,1) : planManual1
+        table.cell(planTable,0,2,planOK1 ? "✓" : "☐",text_color=planOK1 ? color.green : color.gray,text_size=planFont,bgcolor=planBg)
+        table.cell(planTable,1,2,"Cloture au-dessus bande basse",text_color=planText,text_halign=text.align_left,text_size=planFont,bgcolor=planBg)
